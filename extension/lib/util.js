@@ -85,6 +85,47 @@ export function hostOf(url) {
   }
 }
 
+// localhost, IPs privados e de link-local (inclusive IPv4 dentro de IPv6, como o parser de URL serializa).
+// ponytail: nome que só resolve para IP privado no DNS (router.lan) passa — barrar exigiria resolver o nome.
+export function isPrivateHost(host) {
+  let h = String(host || '').replace(/^\[|\]$/g, '').toLowerCase();
+  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
+  if (mapped) {
+    const [hi, lo] = [parseInt(mapped[1], 16), parseInt(mapped[2], 16)];
+    h = `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+  }
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h === '0.0.0.0') return true;
+  const v4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(h);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254) || a === 0;
+  }
+  return h === '::1' || h === '::' || /^f[cd][0-9a-f]{2}:/.test(h) || /^fe[89ab][0-9a-f]:/.test(h);
+}
+
+// URL que a extensão pode buscar a pedido de uma página: só http(s), e rede local só quando a própria página
+// também é local (site em desenvolvimento). A extensão tem host_permissions e passa por cima das proteções que
+// o navegador aplica à página — sem esta regra, um <img data-src="file:///…"> punha um arquivo do disco no kit.
+// Devolve o href normalizado, ou null. Quem busca confere também res.url: num redirecionamento para a rede local
+// o pedido já saiu, mas a resposta é descartada.
+// ponytail: o pedido redirecionado sai mesmo assim; impedir exigiria seguir cada redirecionamento à mão.
+export function fetchableUrl(url, pageUrl) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+  let pageHost = '';
+  try {
+    pageHost = new URL(pageUrl).hostname;
+  } catch {
+    /* sem URL da página: trata como pública */
+  }
+  return isPrivateHost(u.hostname) && !isPrivateHost(pageHost) ? null : u.href;
+}
+
 export function stamp(date = new Date()) {
   const p = (n) => String(n).padStart(2, '0');
   return `${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}-${p(date.getHours())}${p(date.getMinutes())}`;

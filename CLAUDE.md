@@ -40,15 +40,18 @@ partir da v137, ignora `--load-extension`. `scripts/browser.mjs` acha o navegado
    Um `<title>` com `*/` virava código executável no `tailwind.config.js`.
 3. **Dentro de `<style>` gerado, `<` vira `\3c `**; atributos `on*`, `href="javascript:"` e `<script>` de
    SVG não saem em HTML, JSX nem `.svg`.
-4. **Content script não faz fetch entre origens**: pede ao service worker (`background.js`), que só
-   aceita http(s), bloqueia rede local quando a página não é local, tem timeout e teto de tamanho.
-5. **Downloads do kit vão sem cookies.** O que só baixa com cookie vai pela própria página
+4. **Content script não faz fetch entre origens**: pede ao service worker (`background.js`), que tem
+   timeout e teto de tamanho.
+5. **Toda busca a pedido da página passa por `fetchableUrl`** (`lib/util.js`): só http(s), e rede local só
+   quando a página também é local — no service worker e nos downloads do kit. Sem isso, um
+   `<img data-src="file:///…">` punha um arquivo do disco no kit: a extensão descompactada lê `file://`.
+6. **Downloads do kit vão sem cookies.** O que só baixa com cookie vai pela própria página
    (`fetchAsBase64`).
-6. **`extension/lib/` não toca DOM nem `chrome.*`** — é o que deixa testar em Node.
+7. **`extension/lib/` não toca DOM nem `chrome.*`** — é o que deixa testar em Node.
    `lib/figma-scan.js` é script clássico de propósito: roda no painel, no Node e no mundo MAIN do Figma.
-7. **Figma:** o global `figma` só existe com acesso de edição e depois que algum plugin foi aberto uma
+8. **Figma:** o global `figma` só existe com acesso de edição e depois que algum plugin foi aberto uma
    vez no arquivo. O código injetado só **lê** (nenhum setter da API de plugins).
-8. **Seletores `:hover`/`:focus` são analisados uma vez por leitura de CSS** (`parsedStates`). Analisar
+9. **Seletores `:hover`/`:focus` são analisados uma vez por leitura de CSS** (`parsedStates`). Analisar
    por elemento levava a extração do Linear de 8 s para 77 s.
 
 ---
