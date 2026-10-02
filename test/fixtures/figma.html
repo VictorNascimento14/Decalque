@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="pt-BR">
+<head><meta charset="utf-8"><title>Mock DS – Figma</title></head>
+<body style="margin:0;background:#1e1e1e">
+<canvas width="800" height="600"></canvas>
+<script>
+// Simula o subconjunto da API de plugins que o Decalque usa (o global `figma` que o Figma expõe na página).
+(async () => {
+  const png = new Uint8Array(await (await fetch('/hero.png')).arrayBuffer());
+  const solid = (r, g, b, a = 1) => ({ type: 'SOLID', visible: true, color: { r, g, b, a } });
+  const restDoc = {
+    id: '0:1', name: 'Design', type: 'CANVAS', backgroundColor: { r: 0.12, g: 0.12, b: 0.12, a: 1 },
+    children: [
+      {
+        id: '1:1', name: 'Home - Desktop', type: 'FRAME', absoluteBoundingBox: { x: 0, y: 0, width: 1440, height: 2400 },
+        fills: [solid(0.043, 0.043, 0.06)], layoutMode: 'VERTICAL', itemSpacing: 64, paddingTop: 80, paddingBottom: 80, paddingLeft: 120, paddingRight: 120,
+        children: [
+          { id: '1:2', name: 'Hero title', type: 'TEXT', characters: 'Design que converte', absoluteBoundingBox: { x: 120, y: 80, width: 800, height: 140 }, fills: [solid(1, 1, 1)], styles: { text: 'S:2' }, style: { fontFamily: 'Inter', fontWeight: 700, fontSize: 64, lineHeightPercentFontSize: 110, lineHeightUnit: 'FONT_SIZE_%', letterSpacing: -1.28 } },
+          {
+            id: '1:3', name: 'Button', type: 'FRAME', absoluteBoundingBox: { x: 120, y: 260, width: 180, height: 52 }, cornerRadius: 26,
+            fills: [solid(0.776, 0.957, 0.196)], styles: { fill: 'S:1', effect: 'S:3' }, layoutMode: 'HORIZONTAL', itemSpacing: 8,
+            paddingTop: 14, paddingBottom: 14, paddingLeft: 24, paddingRight: 24,
+            effects: [{ type: 'DROP_SHADOW', visible: true, color: { r: 0, g: 0, b: 0, a: 0.3 }, offset: { x: 0, y: 8 }, radius: 24, spread: -4 }],
+            interactions: [{ trigger: { type: 'ON_HOVER' }, actions: [{ type: 'NODE', transition: { type: 'SMART_ANIMATE', duration: 0.25, easing: { type: 'CUSTOM_CUBIC_BEZIER', easingFunctionCubicBezier: { x1: 0.16, y1: 1, x2: 0.3, y2: 1 } } } }] }],
+            children: [
+              { id: '1:4', name: 'Label', type: 'TEXT', characters: 'Começar', absoluteBoundingBox: { x: 144, y: 274, width: 80, height: 24 }, fills: [solid(0.05, 0.05, 0.05)], style: { fontFamily: 'Inter', fontWeight: 600, fontSize: 16, lineHeightPx: 24, lineHeightUnit: 'PIXELS', letterSpacing: 0 } },
+              { id: '1:5', name: 'icon/arrow-right', type: 'VECTOR', absoluteBoundingBox: { x: 240, y: 276, width: 20, height: 20 }, strokes: [solid(0.05, 0.05, 0.05)], strokeWeight: 2 },
+            ],
+          },
+          { id: '1:6', name: 'Photo', type: 'RECTANGLE', absoluteBoundingBox: { x: 120, y: 360, width: 600, height: 400 }, cornerRadius: 16, fills: [{ type: 'IMAGE', imageRef: 'img-hash-1', scaleMode: 'FILL' }] },
+        ],
+      },
+      { id: '2:1', name: 'Home - Mobile', type: 'FRAME', absoluteBoundingBox: { x: 1600, y: 0, width: 390, height: 1800 }, fills: [solid(0.043, 0.043, 0.06)], children: [] },
+    ],
+  };
+  const css = {
+    '1:1': { display: 'flex', width: '1440px', padding: '80px 120px', 'flex-direction': 'column', 'align-items': 'flex-start', gap: '64px', background: 'var(--surface-base, #0B0B0F)' },
+    '1:2': { color: 'var(--text-primary, #FFF)', 'font-family': 'Inter', 'font-size': '64px', 'font-style': 'normal', 'font-weight': '700', 'line-height': '110%', 'letter-spacing': '-1.28px' },
+    '1:3': { display: 'flex', padding: '14px 24px', 'justify-content': 'center', 'align-items': 'center', gap: '8px', 'border-radius': '26px', background: '#C6F432', 'box-shadow': '0px 8px 24px -4px rgba(0, 0, 0, 0.30)' },
+    '1:4': { color: '#0D0D0D', 'font-family': 'Inter', 'font-size': '16px', 'font-weight': '600', 'line-height': '24px' },
+    '1:5': { width: '20px', height: '20px', 'flex-shrink': '0' },
+    '1:6': { width: '600px', height: '400px', 'border-radius': '16px', background: 'url(<path-to-image>) lightgray 50% / cover no-repeat' },
+  };
+  const arrow = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M4 10h12M11 5l5 5-5 5" stroke="#0D0D0D" stroke-width="2" stroke-linecap="round"/></svg>';
+  const byId = {};
+  function mk(rest) {
+    const n = {
+      id: rest.id, name: rest.name, type: rest.type, visible: true,
+      width: rest.absoluteBoundingBox.width, height: rest.absoluteBoundingBox.height, absoluteBoundingBox: rest.absoluteBoundingBox,
+      layoutMode: rest.layoutMode || 'NONE', layoutPositioning: 'AUTO', isAsset: rest.type === 'VECTOR', clipsContent: rest.type === 'FRAME',
+      fills: (rest.fills || []).map((f) => (f.type === 'IMAGE' ? { type: 'IMAGE', imageHash: f.imageRef, scaleMode: 'FILL', visible: true } : f)),
+      characters: rest.characters, fontSize: rest.style && rest.style.fontSize,
+      getCSSAsync: async () => css[rest.id] || {},
+      exportAsync: async (s) => {
+        if (s.format === 'SVG_STRING') return arrow;
+        if (s.format === 'JSON_REST_V1') return { document: rest, styles: {}, components: {}, componentSets: {} };
+        if (s.format === 'WEBM') return new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 1, 2, 3]);
+        return png;
+      },
+    };
+    byId[n.id] = n;
+    if (rest.children) n.children = rest.children.map(mk);
+    return n;
+  }
+  const frames = restDoc.children.map(mk);
+  frames[0].timelines = [{ id: 'tl1', duration: 1.2 }];
+  frames[0].findAll = () => Object.values(byId).filter((n) => n !== frames[0] && n.id.startsWith('1:'));
+  frames[1].timelines = [];
+  byId['1:2'].animations = {
+    OPACITY: { baseValue: { type: 'FLOAT', value: 1 }, timelineDuration: 1.2, tracks: [{ id: 'a', keyframeOperation: 'SET', keyframes: [{ timelinePosition: 0, value: { type: 'FLOAT', value: 0 }, easing: { type: 'LINEAR' } }, { timelinePosition: 0.6, value: { type: 'FLOAT', value: 1 }, easing: { type: 'EASE_OUT' } }] }] },
+    TRANSLATION_Y: { baseValue: { type: 'FLOAT', value: 0 }, timelineDuration: 1.2, tracks: [{ id: 'b', keyframeOperation: 'OFFSET', keyframes: [{ timelinePosition: 0, value: { type: 'FLOAT', value: 32 } }, { timelinePosition: 0.6, value: { type: 'FLOAT', value: 0 }, easing: { type: 'GENTLE' } }] }] },
+  };
+  byId['1:2'].animationStyles = [{ name: 'Fade in', type: 'FIGMA', duration: 0.6, timelineOffset: 0, props: { direction: 'UP' } }];
+  const page = {
+    id: '0:1', name: 'Design', type: 'PAGE', children: frames, selection: [frames[0]],
+    backgrounds: [{ type: 'SOLID', color: { r: 0.12, g: 0.12, b: 0.12 }, opacity: 1 }],
+    loadAsync: async () => {},
+    exportAsync: async () => ({
+      document: restDoc,
+      styles: { 'S:1': { name: 'Brand/Lime', styleType: 'FILL' }, 'S:2': { name: 'Display/XL', styleType: 'TEXT' }, 'S:3': { name: 'Elevation/Card', styleType: 'EFFECT' } },
+      components: {}, componentSets: {},
+    }),
+  };
+  const lime = { r: 0.776, g: 0.957, b: 0.196 };
+  window.figma = {
+    editorType: 'figma',
+    root: { name: 'Mock DS', children: [page] },
+    currentPage: page,
+    skipInvisibleInstanceChildren: false,
+    getLocalPaintStylesAsync: async () => [
+      { id: 'S:1', name: 'Brand/Lime', description: 'Cor de ação', paints: [{ type: 'SOLID', visible: true, opacity: 1, color: lime }] },
+      { id: 'S:4', name: 'Brand/Ink', description: '', paints: [{ type: 'SOLID', visible: true, opacity: 1, color: { r: 0.043, g: 0.043, b: 0.06 } }] },
+    ],
+    getLocalTextStylesAsync: async () => [{ id: 'S:2', name: 'Display/XL', description: '', fontName: { family: 'Inter', style: 'Bold' }, fontSize: 64, lineHeight: { unit: 'PERCENT', value: 110 }, letterSpacing: { unit: 'PERCENT', value: -2 }, textCase: 'ORIGINAL', textDecoration: 'NONE' }],
+    getLocalEffectStylesAsync: async () => [{ id: 'S:3', name: 'Elevation/Card', description: '', effects: [{ type: 'DROP_SHADOW', visible: true, color: { r: 0, g: 0, b: 0, a: 0.3 }, offset: { x: 0, y: 8 }, radius: 24, spread: -4, blendMode: 'NORMAL' }] }],
+    getLocalGridStylesAsync: async () => [],
+    variables: {
+      getLocalVariableCollectionsAsync: async () => [{ id: 'c1', name: 'Theme', modes: [{ modeId: 'm1', name: 'Light' }, { modeId: 'm2', name: 'Dark' }], defaultModeId: 'm1' }],
+      getLocalVariablesAsync: async () => [
+        { id: 'v1', name: 'surface/base', resolvedType: 'COLOR', variableCollectionId: 'c1', description: '', scopes: ['ALL_FILLS'], codeSyntax: {}, valuesByMode: { m1: { r: 1, g: 1, b: 1, a: 1 }, m2: { r: 0.043, g: 0.043, b: 0.06, a: 1 } } },
+        { id: 'v2', name: 'text/primary', resolvedType: 'COLOR', variableCollectionId: 'c1', description: '', scopes: [], codeSyntax: {}, valuesByMode: { m1: { r: 0.05, g: 0.05, b: 0.05, a: 1 }, m2: { type: 'VARIABLE_ALIAS', id: 'v1' } } },
+        { id: 'v3', name: 'radius/pill', resolvedType: 'FLOAT', variableCollectionId: 'c1', description: '', scopes: [], codeSyntax: {}, valuesByMode: { m1: 26, m2: 26 } },
+      ],
+    },
+    motion: { figmaAnimationStyles: () => [{ name: 'Fade in', styleId: 'fig-fade-in', description: '' }, { name: 'Slide up', styleId: 'fig-slide-up', description: '' }] },
+    getNodeByIdAsync: async (id) => byId[id] || null,
+    getImageByHash: (h) => (h === 'img-hash-1' ? { getBytesAsync: async () => png } : null),
+  };
+  document.title = 'Mock DS – Figma (pronto)';
+})();
+</script>
+</body>
+</html>

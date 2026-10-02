@@ -25,3 +25,16 @@ jobs:
       - run: npm run lint
       - run: npm test
 
+  e2e:
+    name: e2e (Chromium com a extensão)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e
