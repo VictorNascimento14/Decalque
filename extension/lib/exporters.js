@@ -1,6 +1,6 @@
-// Modelo → arquivos do kit: tokens.css, Tailwind v4/v3 e W3C DTCG.
+// Modelo → arquivos do kit: tokens.css, Tailwind v4/v3, W3C DTCG, animations.css, reveal.js e DESIGN.md.
 
-import { parseColor, srgbComponents, toHex } from './color.js';
+import { contrast, isChromatic, isDark, parseColor, srgbComponents, toHex } from './color.js';
 import { cmt, cssString, round, slugify, splitTopLevel } from './util.js';
 
 const date = (iso) => (iso ? new Date(iso).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }) : '');
@@ -383,4 +383,346 @@ function safeName(name) {
 
 function renameKeyframes(css, from, to) {
   return from === to ? css : css.replace(/@keyframes\s+("[^"]*"|'[^']*'|[^\s{]+)/, `@keyframes ${to}`);
+}
+
+function revealClass(r) {
+  const name = `reveal-${r.pattern}`;
+  const d = r.durationMs > 50 && r.durationMs < 4000 ? r.durationMs : 700;
+  const e = r.easing && r.easing !== 'ease' ? r.easing : 'cubic-bezier(0.16, 1, 0.3, 1)';
+  const dx = round((r.from.tx || 0) - (r.to.tx || 0), 1);
+  const dy = round((r.from.ty || 0) - (r.to.ty || 0), 1);
+  const from = [`opacity: ${round(r.from.opacity, 2)}`];
+  const to = [`opacity: ${round(r.to.opacity, 2)}`];
+  const props = ['opacity'];
+  if (dx || dy) {
+    from.push(`translate: ${dx}px ${dy}px`);
+    to.push('translate: 0 0');
+    props.push('translate');
+  }
+  if (Math.abs((r.from.sx || 1) - (r.to.sx || 1)) > 0.01) {
+    from.push(`scale: ${round(r.from.sx / (r.to.sx || 1), 3)}`);
+    to.push('scale: 1');
+    props.push('scale');
+  }
+  if (r.from.blur > 0) {
+    from.push(`filter: blur(${r.from.blur}px)`);
+    to.push('filter: none');
+    props.push('filter');
+  }
+  return lines([
+    `/* ${cmt(`${r.count} elemento(s), disparo: ${r.trigger}${r.examples?.length ? ` · ex.: ${r.examples[0]}` : ''}`, 160)} */`,
+    `.${name} { ${from.join('; ')}; transition: ${props.map((p) => `${p} ${d}ms ${e}`).join(', ')}; }`,
+    `.${name}.is-visible { ${to.join('; ')}; }`,
+  ]);
+}
+
+export function toAnimationsCSS(model) {
+  const list = animationsList(model);
+  const unused = model.motion.keyframes.filter((k) => !k.used && !k.animation).slice(0, 30);
+  const reveals = [];
+  const seen = new Set();
+  for (const r of model.motion.reveals || []) {
+    if (seen.has(r.pattern)) continue;
+    seen.add(r.pattern);
+    reveals.push(revealClass(r));
+  }
+  if (!list.length && !unused.length && !reveals.length) return null;
+  return lines([
+    header(model, 'animações'),
+    '',
+    list.length ? '/* ---- Animações em uso (use .animate-<nome>) ---- */' : null,
+    ...list.flatMap((a) => [`/* origem: ${a.source === 'js' ? 'Web Animations API (JS)' : a.source === 'figma' ? 'Figma Motion' : 'CSS'} */`, a.css, `.animate-${a.name} { animation: ${a.shorthand}; }`, '']),
+    unused.length ? '/* ---- @keyframes definidos no CSS mas não vistos em uso nesta captura ---- */' : null,
+    ...unused.map((k) => k.css),
+    reveals.length ? '\n/* ---- Reveals ao rolar a página (dispare com reveal.js) ---- */' : null,
+    ...reveals,
+    reveals.length || list.length
+      ? '\n@media (prefers-reduced-motion: reduce) {\n  [class*="animate-"], [class*="reveal-"] { animation: none !important; transition: none !important; opacity: 1 !important; translate: none !important; scale: none !important; filter: none !important; }\n}'
+      : null,
+    '',
+  ]);
+}
+
+export function revealScript() {
+  return lines([
+    '// Decalque — adiciona .is-visible aos elementos com classe reveal-* quando entram na tela.',
+    "const io = new IntersectionObserver((entries) => {",
+    '  for (const entry of entries) {',
+    '    if (!entry.isIntersecting) continue;',
+    "    entry.target.classList.add('is-visible');",
+    '    io.unobserve(entry.target);',
+    '  }',
+    "}, { threshold: 0.15, rootMargin: '0px 0px -10% 0px' });",
+    '',
+    "document.querySelectorAll('[class*=\"reveal-\"]').forEach((el) => io.observe(el));",
+    '',
+  ]);
+}
+
+// ---------------------------------------------------------------- DESIGN.md
+const md = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+
+function table(head, rows) {
+  if (!rows.length) return '';
+  return [`| ${head.join(' | ')} |`, `| ${head.map(() => '---').join(' | ')} |`, ...rows.map((r) => `| ${r.map(md).join(' | ')} |`)].join('\n');
+}
+
+const ROLE_PT = {
+  background: 'fundo da página', foreground: 'texto principal', muted: 'texto secundário', surface: 'superfícies/cards',
+  border: 'bordas e divisórias', primary: 'ação principal / marca', accent: 'destaque secundário',
+};
+
+function buttonLabel(css, primary) {
+  if (/gradient\(/.test(css.background || '')) return 'gradiente';
+  const bg = parseColor(css.background);
+  const hasBorder = css.border && css.border !== 'none';
+  if (!bg || bg.a === 0) return hasBorder ? 'contorno' : 'fantasma';
+  if (primary && toHex({ ...bg, a: 1 }) === primary) return 'primario';
+  if (isChromatic(bg)) return 'colorido';
+  return isDark(bg) ? 'escuro' : 'claro';
+}
+
+function cssBlock(selector, obj) {
+  const entries = Object.entries(obj).filter(([, v]) => v && v !== 'none' && v !== 'normal' && v !== '0px' && v !== 'transparent');
+  return entries.length ? `${selector} {\n${entries.map(([k, v]) => `  ${k}: ${v};`).join('\n')}\n}` : null;
+}
+
+export function identity(model) {
+  const s = model.semantic;
+  const bits = [];
+  if (s.background) bits.push(`tema ${isDark(s.background) ? 'escuro' : 'claro'} (fundo \`${s.background}\`)`);
+  if (s.primary) bits.push(`cor de ação \`${s.primary}\``);
+  const heading = model.fonts.find((f) => f.role === 'heading');
+  const body = model.fonts.find((f) => f.role === 'sans') || model.fonts[0];
+  if (body) bits.push(heading ? `títulos em **${heading.family}** e texto em **${body.family}**` : `fonte **${body.family}**`);
+  const r = [...model.radii].sort((a, b) => b.count - a.count)[0];
+  bits.push(r ? (r.name === 'full' ? 'formas em pílula' : `cantos de ${r.value}`) : 'cantos retos');
+  bits.push(model.shadows.length ? `${model.shadows.length} nível(is) de sombra` : 'sem sombras');
+  const d = [...model.motion.durations].sort((a, b) => b.count - a.count)[0];
+  const e = [...model.motion.easings].sort((a, b) => b.count - a.count)[0];
+  if (d) bits.push(`movimento de ~${d.ms}ms${e ? ` com \`${e.name}\`` : ''}`);
+  return bits.join(' · ');
+}
+
+export function toDesignMarkdown(model, ctx = {}) {
+  const s = model.source;
+  const out = [];
+  const files = ctx.files || {};
+  const has = (name) => files[name] !== false;
+  const title = cmt(s.kind === 'figma' ? `Figma — ${s.title}` : s.title || s.url, 120).replace(/[#<>`]/g, '');
+  out.push(`# Design system — ${title}`);
+  out.push('');
+  out.push(
+    `> Extraído com **Decalque** ${s.kind === 'figma' ? `do arquivo do Figma "${s.title}" (via ${s.via === 'plugin' ? 'API de plugins' : 'API REST'})` : `de ${s.url}`} em ${date(s.capturedAt)}${s.viewport ? `, viewport ${s.viewport.width}×${s.viewport.height}` : ''}. ` +
+      'Os valores são os efetivamente renderizados; use como referência fiel do visual.',
+  );
+  out.push('');
+  out.push(`**Em uma linha:** ${identity(model)}.`);
+  if (model.stack.length) out.push(`\n**Stack detectada:** ${model.stack.map((x) => `${x.name}${x.version ? ` ${x.version}` : ''}`).join(', ')}.`);
+  out.push('');
+
+  out.push('## Como aplicar no seu projeto');
+  out.push('');
+  out.push('1. **CSS puro:** importe `tokens.css` no CSS global. As classes `.text-*` já trazem a tipografia pronta.');
+  out.push('2. **Tailwind v4:** cole `tailwind.theme.css` no CSS principal (ele já tem `@import "tailwindcss"` e o `@theme`).');
+  out.push('3. **Tailwind v3:** mescle `tailwind.config.js` com o seu.');
+  out.push('4. **Outras ferramentas** (Style Dictionary, Tokens Studio): use `tokens.json` (formato W3C DTCG).');
+  if (has('animations.css')) out.push(`5. **Animações:** \`animations.css\`${has('reveal.js') ? ' + `reveal.js` (adiciona `.is-visible` aos `.reveal-*` quando entram na tela)' : ''}.`);
+  out.push('');
+  out.push('Regras para manter o visual:');
+  out.push('');
+  if (model.semantic.background || model.semantic.primary) {
+    out.push(`- Cores só da paleta abaixo. Fundo \`--color-background\`, texto \`--color-foreground\`${model.semantic.primary ? ', ações `--color-primary`' : ''}${model.semantic.border ? ', bordas `--color-border`' : ''}.`);
+  }
+  if (model.typeScale.length) out.push('- Texto sempre por um estilo da escala tipográfica (sem tamanhos avulsos).');
+  if (model.spacing.base) out.push(`- Espaçamentos em múltiplos de **${model.spacing.base}px**.`);
+  if (model.radii.length) out.push(`- Raios: ${model.radii.map((r) => `\`${r.name}\` ${r.value}`).join(', ')}.`);
+  if (model.motion.durations.length) out.push(`- Movimento: durações ${model.motion.durations.map((d) => `${d.ms}ms`).join(', ')}${model.motion.easings[0] ? `; curva principal \`${model.motion.easings[0].value}\`` : ''}.`);
+  out.push('- Logos, fotos e ilustrações de terceiros são de quem fez o original: troque pelos seus antes de publicar.');
+  out.push('');
+  out.push('<details><summary>Prompt pronto para um agente de IA (Claude Code, Cursor…)</summary>');
+  out.push('');
+  out.push('```text');
+  out.push('Aplique neste projeto o design system descrito em DESIGN.md (pasta do kit Decalque).');
+  out.push('Use os tokens de tokens.css (ou tailwind.theme.css se o projeto usa Tailwind v4), a escala');
+  out.push('tipográfica, os espaçamentos, raios, sombras e as animações de animations.css. Reproduza os');
+  out.push('componentes descritos (botões, inputs, cards) com os mesmos valores. Não invente cores nem');
+  out.push('tamanhos fora da escala. Imagens e ícones estão em assets/.');
+  out.push('```');
+  out.push('');
+  out.push('</details>');
+  out.push('');
+
+  out.push('## Cores');
+  out.push('');
+  out.push(table(['Token', 'Valor', 'Papel', 'Onde aparece'], colorTokens(model).map((c) => [
+    `\`--color-${c.name}\``,
+    `\`${c.value}\`${c.alpha < 1 ? ` (${Math.round(c.alpha * 100)}%)` : ''}${c.original ? ` · \`${c.original}\`` : ''}`,
+    c.role ? ROLE_PT[c.role] || c.role : c.styleName ? `estilo "${c.styleName}"` : '',
+    c.roles?.length ? c.roles.map((r) => ({ text: 'texto', bg: 'fundo', fill: 'preenchimento', border: 'borda', stroke: 'contorno', shadow: 'sombra', gradient: 'gradiente' })[r] || r).join(', ') : c.usedOn?.join(', ') || '',
+  ])));
+  if (model.stats.contrast) out.push(`\nContraste texto/fundo: **${model.stats.contrast}:1**${model.stats.contrast >= 7 ? ' (AAA)' : model.stats.contrast >= 4.5 ? ' (AA)' : ' (abaixo do AA)'}.`);
+  if (model.gradients.length) {
+    out.push('\n### Gradientes\n');
+    for (const g of model.gradients) out.push(`- \`--${g.name}\`: \`${g.value}\``);
+  }
+  const { light, dark, collections } = model.variables;
+  if (collections?.length) {
+    out.push('\n### Variáveis do Figma\n');
+    for (const c of collections) {
+      out.push(`**${c.name}** — modos: ${c.modes.join(', ')}\n`);
+      out.push(table(['Variável', ...c.modes], c.variables.slice(0, 60).map((v) => [v.name, ...c.modes.map((md) => {
+        const val = v.values[md];
+        return val && typeof val === 'object' ? `→ ${val.alias}` : String(val ?? '');
+      })])));
+      if (c.variables.length > 60) out.push(`\n… e mais ${c.variables.length - 60} (todas em \`site-variables.css\`).`);
+      out.push('');
+    }
+  } else if (light.length || dark.length) {
+    out.push(`\n### Variáveis CSS do próprio site\n\nO site já tem tokens com nomes próprios (${light.length} no tema padrão${dark.length ? `, ${dark.length} no tema escuro` : ''}). Estão em \`site-variables.css\`. As de cor:\n`);
+    const colorVars = light.filter((v) => v.type === 'color').slice(0, 30);
+    out.push(table(['Variável', 'Valor', 'Escuro'], colorVars.map((v) => [`\`${v.name}\``, `\`${v.value}\``, dark.find((d) => d.name === v.name)?.value || ''])));
+  }
+  out.push('');
+
+  out.push('## Tipografia');
+  out.push('');
+  if (model.fonts.length) {
+    out.push(table(['Família', 'Papel', 'Pesos', 'Origem'], model.fonts.map((f) => [
+      f.family,
+      f.role || '',
+      f.weights.join(', '),
+      { google: 'Google Fonts', adobe: 'Adobe Fonts (licença)', self: 'auto-hospedada (arquivos no kit)', system: 'fonte do sistema', figma: 'Figma', unknown: '?' }[f.source] || f.source,
+    ])));
+    if (model.fonts.googleUrl) out.push(`\nGoogle Fonts: \`<link href="${model.fonts.googleUrl}" rel="stylesheet">\`${model.fonts.googleGuess ? ' (tentativa — confirme cada família)' : ''}`);
+  }
+  out.push('');
+  out.push(table(['Estilo', 'Fonte', 'Tamanho', 'Peso', 'Altura de linha', 'Espaçamento', 'Exemplo'], model.typeScale.map((t) => [
+    `\`.text-${t.name}\``, t.family, `${t.size}px`, t.weight, t.lineHeight, t.letterSpacing, `${t.transform ? `[${t.transform}] ` : ''}${t.sample}`.slice(0, 50),
+  ])));
+  out.push('');
+
+  out.push('## Espaçamento, forma e profundidade');
+  out.push('');
+  if (model.spacing.scale.length) {
+    out.push(`Escala de espaçamento${model.spacing.base ? ` (grade de ${model.spacing.base}px)` : ''}: ${model.spacing.scale.map((x) => `${x.px}px`).join(' · ')}`);
+    if (model.spacing.gaps?.length) out.push(`\nGaps mais usados em flex/grid: ${model.spacing.gaps.slice(0, 6).map((g) => `${g.px}px`).join(', ')}`);
+  }
+  if (model.radii.length) out.push(`\nRaios: ${model.radii.map((r) => `\`${r.name}\` = ${r.value} (${r.count}×)`).join(' · ')}`);
+  if (model.shadows.length) {
+    out.push('\nSombras:\n');
+    for (const sh of model.shadows) out.push(`- \`--shadow-${sh.name}\`: \`${sh.value}\``);
+  }
+  if (model.effects.length) out.push(`\nEfeitos: ${model.effects.map((e) => `${e.kind === 'backdrop' ? 'backdrop-filter' : 'filter'} \`${e.value}\``).join(' · ')}`);
+  if (model.borders.length) out.push(`\nBordas: ${model.borders.map((b) => `\`${b.value}\` (${b.count}×)`).join(' · ')}`);
+  out.push('');
+
+  if (model.breakpoints.length || model.containers.length) {
+    out.push('## Layout');
+    out.push('');
+    if (model.breakpoints.length) out.push(`Breakpoints${model.breakpoints[0].fromFrames ? ' (larguras dos frames do Figma)' : ''}: ${model.breakpoints.map((b) => `\`${b.name}\` ${b.px}px`).join(' · ')}`);
+    if (model.containers.length) out.push(`\nLargura máxima de conteúdo: ${model.containers.map((c) => `${c.px}px`).join(', ')}`);
+    out.push('');
+  }
+
+  const comps = model.components;
+  if (comps.buttons.length || comps.inputs.length || comps.cards.length || comps.links.length) {
+    out.push('## Componentes recorrentes');
+    out.push('');
+    out.push('Valores computados de verdade (não aproximações). Estados vêm das regras `:hover`/`:focus` do CSS do site.');
+    out.push('');
+    const block = (title, list, prefix, label) => {
+      if (!list.length) return;
+      out.push(`### ${title}\n`);
+      list.forEach((c, i) => {
+        const name = `${prefix}-${slugify(label ? label(c.css) : String(i + 1))}${list.length > 1 && label ? `-${i + 1}` : ''}`;
+        out.push(`\`${c.count}×\`${c.sample ? ` — ex.: "${md(c.sample)}"` : ''}`);
+        out.push('');
+        out.push('```css');
+        out.push(cssBlock(`.${name}`, c.css));
+        for (const [state, decls] of Object.entries(c.states || {})) {
+          const block = cssBlock(`.${name}:${state}`, decls);
+          if (block) out.push(block);
+        }
+        out.push('```');
+        out.push('');
+      });
+    };
+    block('Botões', comps.buttons, 'btn', (css) => buttonLabel(css, model.semantic.primary));
+    block('Campos de formulário', comps.inputs, 'input');
+    block('Cards', comps.cards, 'card');
+    block('Links', comps.links, 'link');
+  }
+  if (comps.figma?.length) {
+    out.push('## Componentes do Figma');
+    out.push('');
+    out.push(table(['Componente', 'Variantes', 'Tamanho', 'Página', 'Descrição'], comps.figma.slice(0, 80).map((c) => [c.name, c.variants || '', `${c.width}×${c.height}`, c.page, c.description])));
+    out.push('');
+  }
+
+  const mo = model.motion;
+  if (mo.durations.length || mo.keyframes.length || mo.reveals?.length || mo.running?.length || mo.transitions.length) {
+    out.push('## Movimento');
+    out.push('');
+    if (mo.durations.length) out.push(`Durações: ${mo.durations.map((d) => `${d.ms}ms (${d.count}×)`).join(' · ')} — tokens \`--duration-<ms>\`.`);
+    if (mo.easings.length) out.push(`\nCurvas: ${mo.easings.map((e) => `\`${e.name}\` = \`${e.value}\``).join(' · ')}`);
+    if (mo.springs?.length) out.push(`\nMolas (Figma): ${mo.springs.map((sp) => `\`${sp.name}\` massa ${sp.mass}, rigidez ${sp.stiffness}, amortecimento ${sp.damping} — Framer Motion: \`{ type: "spring", stiffness: ${sp.stiffness}, damping: ${sp.damping}, mass: ${sp.mass} }\``).join('; ')}`);
+    if (mo.transitions.length) {
+      out.push('\nTransições mais comuns:\n');
+      out.push(table(['Propriedade', 'Duração', 'Curva', 'Uso'], mo.transitions.slice(0, 10).map((t) => [t.property, `${t.durationMs}ms`, t.easing, `${t.count}×${t.triggers?.length ? ` (${t.triggers.join(', ')})` : ''}`])));
+    }
+    if (mo.reveals?.length) {
+      out.push('\n### Reveals ao rolar\n');
+      out.push('Detectados rolando a página. Classes prontas em `animations.css` (`.reveal-*` + `reveal.js`).\n');
+      out.push(table(['Padrão', 'De → para', 'Duração', 'Disparo', 'Elementos'], mo.reveals.map((r) => [
+        `\`reveal-${r.pattern}\``,
+        `opacidade ${r.from.opacity}→${r.to.opacity}${r.from.ty !== r.to.ty ? `, y ${round(r.from.ty - r.to.ty, 0)}px→0` : ''}${r.from.tx !== r.to.tx ? `, x ${round(r.from.tx - r.to.tx, 0)}px→0` : ''}${r.from.sx !== r.to.sx ? `, escala ${r.from.sx}→${r.to.sx}` : ''}`,
+        r.durationMs ? `${r.durationMs}ms` : '?',
+        r.trigger,
+        `${r.count}${r.examples?.[0] ? ` (ex.: ${r.examples[0]})` : ''}`,
+      ])));
+    }
+    const list = animationsList(model);
+    if (list.length) {
+      out.push('\n### Animações\n');
+      for (const a of list.slice(0, 12)) {
+        out.push(`**${a.name}** — \`animation: ${a.shorthand}\` (${a.source === 'js' ? 'Web Animations API' : a.source === 'figma' ? 'Figma Motion' : 'CSS'})\n`);
+        out.push('```css');
+        out.push(a.css);
+        out.push('```');
+        out.push('');
+      }
+    }
+    if (mo.presets?.length) out.push(`\nEstilos de animação disponíveis no Figma: ${mo.presets.slice(0, 20).map((p) => p.name).join(', ')}`);
+    const libs = model.stack.filter((x) => x.kind === 'motion');
+    if (libs.length) out.push(`\nBibliotecas de animação no site: ${libs.map((l) => `${l.name}${l.version ? ` ${l.version}` : ''}`).join(', ')}. Animações feitas por elas só aparecem aqui se estavam rodando na captura (ou nos reveals).`);
+    out.push('');
+  }
+
+  const a = model.assets;
+  const assetLines = ctx.assetIndex || [];
+  if (assetLines.length || a.images.length || a.svgs.length) {
+    out.push('## Assets');
+    out.push('');
+    const counts = [
+      a.images.length && `${a.images.length} imagens`, a.svgs.length && `${a.svgs.length} SVGs/ícones`, a.fonts.length && `${a.fonts.length} arquivos de fonte`,
+      a.lottie.length && `${a.lottie.length} Lottie`, a.videos.length && `${a.videos.length} vídeos`, a.frames?.length && `${a.frames.length} frames`, a.icons?.length && `${a.icons.length} ícones`,
+    ].filter(Boolean);
+    out.push(`${counts.join(' · ')}. ${assetLines.length ? 'Arquivos baixados em `assets/` (lista completa em `assets/manifest.json`).' : ''}`);
+    if (assetLines.length) {
+      out.push('');
+      out.push(table(['Arquivo', 'Tipo', 'Origem'], assetLines.slice(0, 40).map((x) => [`\`${x.path}\``, x.kind, x.url ? x.url.slice(0, 80) : x.note || ''])));
+      if (assetLines.length > 40) out.push(`\n… e mais ${assetLines.length - 40}.`);
+    }
+    out.push('');
+  }
+
+  if (model.notes.length) {
+    out.push('## Observações');
+    out.push('');
+    for (const n of model.notes) out.push(`- ${n}`);
+    if (s.kind === 'web') out.push(`- Valores medidos no viewport de ${s.viewport?.width}px; estilos de outros breakpoints não aparecem nos componentes.`);
+    out.push('');
+  }
+  return out.filter((l) => l !== null && l !== undefined).join('\n').replace(/\n{3,}/g, '\n\n');
 }
