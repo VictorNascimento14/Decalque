@@ -4,6 +4,7 @@ Mudanças do Decalque, da mais nova para a mais antiga. Cada entrada linka o PR 
 
 ## [Não lançado]
 
+- [#11](https://github.com/VictorNascimento14/Decalque/pull/11) — feat(exportação): gerar animations.css, reveal.js e DESIGN.md · [nota](prs/2026-10-02-pr-11-exportar-design-md.md)
 - [#10](https://github.com/VictorNascimento14/Decalque/pull/10) — feat(exportação): gerar tokens em CSS, Tailwind v4/v3 e W3C DTCG · [nota](prs/2026-10-02-pr-10-exportar-tokens.md)
 - [#9](https://github.com/VictorNascimento14/Decalque/pull/9) — feat(modelo): transformar a extração em design system com papéis e escalas · [nota](prs/2026-10-02-pr-9-modelo.md)
 - [#8](https://github.com/VictorNascimento14/Decalque/pull/8) — feat(extração): rolar a página para pegar reveals e animações em execução · [nota](prs/2026-10-02-pr-8-extracao-movimento.md)
