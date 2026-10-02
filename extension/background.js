@@ -1,5 +1,7 @@
 // Decalque — service worker: abre o painel lateral pelo ícone e faz fetch entre origens para os content scripts.
 
+import { fetchableUrl } from './lib/util.js';
+
 const openOnClick = () => chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 chrome.runtime.onInstalled.addListener(openOnClick);
 chrome.runtime.onStartup.addListener(openOnClick);
@@ -12,18 +14,6 @@ try {
 
 const MAX_BYTES = 8 * 1024 * 1024;
 const TIMEOUT_MS = 15000;
-
-// localhost, IPs privados e de link-local: só quando a própria página também é local (ex.: site em desenvolvimento).
-function isPrivateHost(host) {
-  const h = host.replace(/^\[|\]$/g, '').toLowerCase();
-  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h === '0.0.0.0') return true;
-  const v4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(h);
-  if (v4) {
-    const [a, b] = [Number(v4[1]), Number(v4[2])];
-    return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254) || a === 0;
-  }
-  return h === '::1' || /^f[cd][0-9a-f]{2}:/.test(h) || /^fe[89ab][0-9a-f]:/.test(h);
-}
 
 async function readText(res) {
   const len = Number(res.headers.get('content-length') || 0);
@@ -51,34 +41,21 @@ async function readText(res) {
 }
 
 // Content scripts não podem ler CSS de outra origem (CORS); com host_permissions o worker pode.
-// Só responde a content scripts em abas, só http(s) e só devolve texto (folhas de estilo, JSON do Lottie).
+// Só responde a content scripts em abas, só devolve texto (folhas de estilo, JSON do Lottie) e só busca o que
+// fetchableUrl aceita (http(s); rede local só a partir de página local).
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || msg.type !== 'decalque:fetch' || !sender.tab) return false;
-  let url;
-  try {
-    url = new URL(msg.url);
-  } catch {
-    sendResponse({ error: 'URL inválida' });
-    return false;
-  }
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-    sendResponse({ error: 'protocolo não suportado' });
-    return false;
-  }
-  let pageHost = '';
-  try {
-    pageHost = new URL(sender.tab.url || sender.url || '').hostname;
-  } catch {
-    /* sem URL da aba */
-  }
-  if (isPrivateHost(url.hostname) && !isPrivateHost(pageHost)) {
-    sendResponse({ error: 'endereço de rede local bloqueado' });
+  const pageUrl = sender.tab.url || sender.url;
+  const href = fetchableUrl(msg.url, pageUrl);
+  if (!href) {
+    sendResponse({ error: 'URL bloqueada: só http(s), e rede local só a partir de página local' });
     return false;
   }
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-  fetch(url.href, { credentials: 'omit', signal: ctrl.signal })
+  fetch(href, { credentials: 'omit', signal: ctrl.signal })
     .then(async (res) => {
+      if (res.redirected && !fetchableUrl(res.url, pageUrl)) throw new Error('URL bloqueada: redirecionou para a rede local');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       sendResponse({ text: await readText(res) });
     })
