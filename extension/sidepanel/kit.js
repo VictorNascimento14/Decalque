@@ -1,8 +1,9 @@
-// Monta o kit .zip: arquivos de tokens + assets baixados (imagens, SVGs, fontes, Lottie).
+// Monta o kit .zip: arquivos de tokens + assets baixados (imagens, SVGs, fontes, Lottie, frames do Figma).
 
 import {
   revealScript, toAnimationsCSS, toCSS, toDesignMarkdown, toDTCG, toSiteVariablesCSS, toTailwindV3, toTailwindV4,
 } from '../lib/exporters.js';
+import { restImageFills, restRenderUrls } from '../lib/figma.js';
 import { createZip } from '../lib/zip.js';
 import { fetchableUrl, hostOf, slugify, stamp } from '../lib/util.js';
 import { base64ToBytes } from './dom.js';
@@ -178,13 +179,103 @@ async function webAssets(model, files, opts, progress) {
   return urlToPath;
 }
 
+async function figmaAssets(model, files, opts, progress) {
+  const fig = opts.figma;
+  const frames = opts.frames === 'none' ? [] : model.assets.frames.filter((f) => opts.frames === 'all' || f.page === fig.currentPage).slice(0, 60);
+  const icons = opts.icons ? model.assets.icons.slice(0, 300) : [];
+  const images = opts.images ? model.assets.figmaImages.slice(0, 150) : [];
+  const videos = opts.videos ? (model.motion.timelines || []).slice(0, 8) : [];
+  const scaleFor = (f) => (f.height * opts.scale > 12000 ? Math.max(0.25, 12000 / f.height) : opts.scale);
+  let done = 0;
+  const total = frames.length + icons.length + images.length + videos.length;
+  const tick = () => {
+    done++;
+    progress(`Exportando do Figma… ${done}/${total}`);
+  };
+  const fail = (what, e) => files.failed.push({ url: what, kind: 'figma', error: String(e.message || e) });
+
+  if (fig.via === 'plugin') {
+    for (const f of frames) {
+      try {
+        const r = await fig.call('exportNode', [f.id, { format: 'PNG', scale: scaleFor(f) }]);
+        files.add(files.name(`assets/frames/${slugify(f.page) || 'pagina'}`, f.name, 'png'), base64ToBytes(r.base64), { kind: 'frame', note: `${f.page} › ${f.name}` });
+      } catch (e) {
+        fail(f.name, e);
+      }
+      tick();
+    }
+    for (const ic of icons) {
+      try {
+        const r = await fig.call('exportNode', [ic.id, { format: 'SVG' }]);
+        files.add(files.name('assets/icons', ic.name, 'svg'), r.text, { kind: 'icon', note: `${ic.width}×${ic.height}` });
+      } catch (e) {
+        fail(ic.name, e);
+      }
+      tick();
+    }
+    for (const im of images) {
+      try {
+        const r = await fig.call('imageBytes', [im.ref]);
+        files.add(files.name('assets/images', im.names[0] || im.ref.slice(0, 10), r.ext), base64ToBytes(r.base64), { kind: 'image', note: im.names.join(', ') });
+      } catch (e) {
+        fail(im.names[0] || im.ref, e);
+      }
+      tick();
+    }
+    for (const v of videos) {
+      try {
+        const r = await fig.call('exportNode', [v.frameId, { format: 'WEBM' }]);
+        files.add(files.name('assets/videos', v.frame, r.ext), base64ToBytes(r.base64), { kind: 'video', note: `${v.durationMs}ms` });
+      } catch (e) {
+        fail(`${v.frame} (vídeo)`, e);
+      }
+      tick();
+    }
+    return;
+  }
+
+  // API REST: 1 chamada por lote de render + downloads diretos das URLs (não contam no limite).
+  // Erro numa chamada (ex.: 429) marca só aquele grupo como falho; o kit sai com o resto.
+  const urlsOrFail = async (what, list, fn) => {
+    try {
+      return await fn();
+    } catch (e) {
+      for (const x of list) fail(`${what}: ${x.name || x.ref}`, e);
+      return {};
+    }
+  };
+  const grab = async (url, folder, base, ext, meta) => {
+    try {
+      const { bytes } = await fetchBytes(url, null, model.source.url);
+      files.add(files.name(folder, base, ext), bytes, meta);
+    } catch (e) {
+      fail(base, e);
+    }
+    tick();
+  };
+  if (frames.length) {
+    const urls = await urlsOrFail('frame', frames, () => restRenderUrls(fig.key, fig.token, frames.map((f) => f.id), { format: 'png', scale: opts.scale }));
+    await pool(frames, 4, (f) => (urls[f.id] ? grab(urls[f.id], `assets/frames/${slugify(f.page) || 'pagina'}`, f.name, 'png', { kind: 'frame', note: `${f.page} › ${f.name}` }) : tick()));
+  }
+  if (icons.length) {
+    const urls = await urlsOrFail('ícone', icons, () => restRenderUrls(fig.key, fig.token, icons.map((i) => i.id), { format: 'svg' }));
+    await pool(icons, 6, (ic) => (urls[ic.id] ? grab(urls[ic.id], 'assets/icons', ic.name, 'svg', { kind: 'icon' }) : tick()));
+  }
+  if (images.length) {
+    const urls = await urlsOrFail('imagem', images, () => restImageFills(fig.key, fig.token));
+    await pool(images, 4, (im) => (urls[im.ref] ? grab(urls[im.ref], 'assets/images', im.names[0] || im.ref.slice(0, 10), 'png', { kind: 'image' }) : tick()));
+  }
+}
+
 export async function buildKit(model, opts) {
   const progress = opts.onProgress || (() => {});
-  const label = slugify(hostOf(model.source.url));
+  const label = model.source.kind === 'figma' ? slugify(model.source.title) || 'figma' : slugify(hostOf(model.source.url));
   const root = `decalque-${label}-${stamp()}`;
   const files = new Files(root);
 
-  const urlToPath = await webAssets(model, files, opts, progress);
+  let urlToPath = new Map();
+  if (model.source.kind === 'figma') await figmaAssets(model, files, opts, progress);
+  else urlToPath = await webAssets(model, files, opts, progress);
   if (opts.screenshot) {
     try {
       files.add('screenshot.png', base64ToBytes(opts.screenshot.split(',')[1]), { kind: 'screenshot', note: 'viewport no momento da captura' });
