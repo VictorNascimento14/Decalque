@@ -1,6 +1,7 @@
 // Controlador do painel lateral: acompanha a aba ativa, injeta os scripts e desenha as telas.
 
 import { buildWebModel } from '../lib/model.js';
+import { buildFigmaModel, fetchFileViaRest, parseFigmaUrl } from '../lib/figma.js';
 import { globalCss, renderCSS, renderDocument, renderHTML, renderJSX, componentName } from '../lib/component.js';
 import { createZip } from '../lib/zip.js';
 import { hostOf, slugify, stamp } from '../lib/util.js';
@@ -19,7 +20,9 @@ const state = {
   error: null,
   section: 'overview',
   byTab: new Map(),
-  opts: { scroll: true, includeVideos: false },
+  figma: null,
+  token: '',
+  opts: { scroll: true, includeVideos: false, frames: 'current', scale: 1, icons: true, images: true, videos: false, scope: 'all' },
   view: 'design',
   capture: null,
   captureCode: null,
@@ -31,8 +34,10 @@ const state = {
 
 const current = () => (state.tab && state.byTab.get(state.tab.id)) || {};
 
-// Mesma chave = mesmo documento (ignora #hash e a query de navegação)
+// Mesma chave = mesmo documento (ignora #hash, query de navegação e o ?node-id= que o Figma reescreve)
 function pageKey(url) {
+  const f = parseFigmaUrl(url || '');
+  if (f && f.key) return `figma:${f.key}`;
   try {
     const u = new URL(url);
     return u.origin + u.pathname;
@@ -61,6 +66,19 @@ async function callContent(tabId, method, args = []) {
   });
   const r = res && res.result;
   if (!r) throw new Error('A página não respondeu (ela recarregou ou bloqueia extensões).');
+  if (r.error) throw new Error(r.error);
+  return r.ok;
+}
+
+async function callFigma(tabId, method, args = []) {
+  const [res] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    func: (m, a) => (window.__decalqueFigma ? window.__decalqueFigma.run(m, a) : { error: 'Ponte do Figma não carregada.' }),
+    args: [method, args],
+  });
+  const r = res && res.result;
+  if (!r) throw new Error('O Figma não respondeu.');
   if (r.error) throw new Error(r.error);
   return r.ok;
 }
@@ -112,7 +130,7 @@ async function probeLibs(tabId) {
 function modeFor(tab) {
   const url = (tab && tab.url) || '';
   if (!/^https?:|^file:/.test(url) || /^https:\/\/(chrome\.google\.com\/webstore|chromewebstore\.google\.com)/.test(url)) return 'blocked';
-  return 'web';
+  return parseFigmaUrl(url) ? 'figma' : 'web';
 }
 
 async function resolveTab() {
@@ -131,11 +149,13 @@ async function refresh() {
   state.mode = modeFor(tab);
   if (changed) {
     if (state.picking) cancelPick();
+    state.figma = null;
     state.view = 'design';
     state.capture = null;
     state.error = null;
   }
   render();
+  if (state.mode === 'figma' && parseFigmaUrl(tab.url).key && !state.figma) checkFigma();
 }
 
 // ------------------------------------------------------------------ execução com status
@@ -262,22 +282,77 @@ async function inlineCaptureFonts(cap) {
   if (state.view === 'component') render();
 }
 
+// ------------------------------------------------------------------ ações: Figma
+async function checkFigma() {
+  const tab = state.tab;
+  try {
+    await inject(tab.id, ['lib/figma-scan.js', 'content/figma-main.js'], 'MAIN');
+    state.figma = await callFigma(tab.id, 'status');
+  } catch (e) {
+    state.figma = { available: false, error: String(e.message || e) };
+  }
+  render();
+}
+
+async function extractFigma() {
+  const tab = state.tab;
+  await run('Lendo o arquivo do Figma…', async (progress) => {
+    await inject(tab.id, ['lib/figma-scan.js', 'content/figma-main.js'], 'MAIN');
+    progress(state.opts.scope === 'all' ? 'Lendo todas as páginas (arquivos grandes levam alguns segundos)…' : 'Lendo a página atual…');
+    const snap = await callFigma(tab.id, 'snapshot', [{ scope: state.opts.scope }]);
+    const model = buildFigmaModel(snap, { url: tab.url });
+    state.byTab.set(tab.id, { model, kind: 'figma', key: pageKey(tab.url), figma: { via: 'plugin', currentPage: snap.file.currentPage } });
+    state.section = 'overview';
+    toast(`Figma lido: ${model.colors.length} cores, ${model.typeScale.length} estilos de texto`);
+  });
+}
+
+async function extractFigmaRest(token) {
+  const tab = state.tab;
+  const info = parseFigmaUrl(tab.url);
+  if (!token) {
+    state.error = 'Cole um token de acesso pessoal do Figma.';
+    render();
+    return;
+  }
+  await run('Baixando o arquivo pela API REST…', async () => {
+    const snap = await fetchFileViaRest(info.key, token);
+    state.token = token; // só guarda token que funcionou
+    await chrome.storage.local.set({ figmaToken: token });
+    const model = buildFigmaModel(snap, { url: tab.url });
+    const firstPage = model.source.pages[0];
+    state.byTab.set(tab.id, { model, kind: 'figma', key: pageKey(tab.url), figma: { via: 'rest', key: info.key, currentPage: firstPage } });
+    state.section = 'overview';
+  });
+}
+
+async function captureFigmaSelection() {
+  await run('Gerando código da seleção…', async () => {
+    await inject(state.tab.id, ['lib/figma-scan.js', 'content/figma-main.js'], 'MAIN');
+    const cap = await callFigma(state.tab.id, 'captureSelection', [{ maxNodes: 600 }]);
+    showCapture(cap);
+  });
+}
+
 // ------------------------------------------------------------------ exportação
 async function downloadKit() {
   const cur = current();
   if (!cur.model) return;
   const tabId = state.tab.id;
   await run('Montando o kit…', async (progress) => {
-    const opts = {
-      onProgress: progress,
-      includeVideos: state.opts.includeVideos,
-      screenshot: cur.shot,
-      // o que o painel não baixa sem cookie, a própria página baixa
-      viaPage: async (url) => {
+    const opts = { onProgress: progress, includeVideos: state.opts.includeVideos, screenshot: cur.shot };
+    if (cur.kind === 'figma') {
+      Object.assign(opts, {
+        figma: { ...cur.figma, token: state.token, call: (m, a) => callFigma(tabId, m, a) },
+        frames: state.opts.frames, scale: state.opts.scale, icons: state.opts.icons, images: state.opts.images, videos: state.opts.videos,
+      });
+      if (cur.figma.via === 'plugin') await inject(tabId, ['lib/figma-scan.js', 'content/figma-main.js'], 'MAIN');
+    } else {
+      opts.viaPage = async (url) => {
         await inject(tabId, ['content/extract.js']);
         return callContent(tabId, 'fetchAsBase64', [url]);
-      },
-    };
+      };
+    }
     const kit = await buildKit(cur.model, opts);
     downloadBlob(kit.blob, kit.filename);
     toast(`Kit pronto: ${kit.count} arquivos${kit.failed.length ? ` (${kit.failed.length} assets falharam — ver assets/manifest.json)` : ''}`);
@@ -383,6 +458,7 @@ function setOpt(key, value) {
 function targetLabel() {
   const tab = state.tab;
   if (!tab) return '—';
+  if (state.mode === 'figma') return state.figma && state.figma.file ? state.figma.file : 'Figma';
   return hostOf(tab.url || '');
 }
 
@@ -399,6 +475,55 @@ function webControls() {
     state.picking ? h('p', { class: 'hint', text: 'Passe o mouse e clique no elemento. Depois de clicar na página, ↑/↓ sobem ou descem um nível e Esc cancela.' }) : null);
 }
 
+function tokenForm() {
+  const input = h('input', { type: 'password', placeholder: 'figd_…', autocomplete: 'off', spellcheck: 'false', class: 'token', 'aria-label': 'Token de acesso pessoal do Figma' });
+  input.value = state.token || '';
+  return h('div', { class: 'token-form' },
+    h('p', { class: 'small', text: 'Token de acesso pessoal: Figma → Configurações → Segurança → Tokens de acesso pessoal (escopo “file_content:read”). Fica salvo só neste navegador.' }),
+    h('div', { class: 'row-inline' }, input, h('button', { class: 'ghost', onclick: () => extractFigmaRest(input.value.trim()), disabled: !!state.busy }, 'Extrair via API')),
+    state.token
+      ? h('button', {
+        class: 'link-btn',
+        onclick: async () => {
+          state.token = '';
+          await chrome.storage.local.remove('figmaToken');
+          toast('Token apagado deste navegador');
+          render();
+        },
+      }, svgIcon('x'), 'Esquecer o token salvo')
+      : null,
+    h('p', { class: 'muted small', text: 'A API REST tem limite de uso: no plano gratuito, assentos View/Collab têm poucas chamadas por mês. Cada extração usa 1 chamada; o kit, mais 1 a 3.' }));
+}
+
+function figmaControls() {
+  const info = parseFigmaUrl(state.tab.url);
+  if (!info.key) {
+    return h('section', { class: 'controls' },
+      h('p', { text: 'Abra um arquivo de design do Figma (figma.com/design/…) para extrair estilos, variáveis e frames.' }),
+      h('button', { class: 'ghost wide', onclick: extractWeb, disabled: !!state.busy }, 'Extrair esta página como site'));
+  }
+  const f = state.figma;
+  if (!f) return h('section', { class: 'controls' }, h('p', { class: 'muted', text: 'Procurando a API do Figma nesta aba…' }));
+  if (!f.available) {
+    return h('section', { class: 'controls warn' },
+      h('h3', { text: 'A API do Figma ainda não está ativa nesta aba' }),
+      h('ol', { class: 'steps' },
+        h('li', { text: 'Você precisa poder editar o arquivo. Arquivo da Comunidade ou só de visualização? Duplique para os seus Rascunhos.' }),
+        h('li', { text: 'Abra qualquer plugin uma vez neste arquivo (menu Ações → Plugins e widgets) e feche. O Figma só expõe a API depois disso.' }),
+        h('li', {}, h('button', { class: 'primary', onclick: checkFigma }, svgIcon('refresh'), 'Tentar de novo'))),
+      h('details', { class: 'alt' }, h('summary', { text: 'Ou usar a API REST com um token' }), tokenForm()));
+  }
+  const cur = current();
+  const radio = (value, label) => h('label', { class: 'radio' }, h('input', { type: 'radio', name: 'scope', value, checked: state.opts.scope === value, onchange: () => setOpt('scope', value) }), h('span', { text: label }));
+  return h('section', { class: 'controls' },
+    h('p', { class: 'small' }, h('strong', { text: f.file }), ` · ${f.pages.length} ${f.pages.length === 1 ? 'página' : 'páginas'} · página atual: ${f.page}`),
+    h('div', { class: 'radios' }, radio('all', 'Todas as páginas'), radio('current', 'Só a página atual')),
+    h('button', { class: 'primary wide', onclick: extractFigma, disabled: !!state.busy }, svgIcon('wand'), cur.model ? 'Extrair de novo' : 'Extrair design do arquivo'),
+    h('button', { class: 'ghost wide', onclick: captureFigmaSelection, disabled: !!state.busy || !f.selectionCount, title: f.selectionCount ? '' : 'Selecione um frame ou camada no Figma' }, svgIcon('target'), f.selectionCount ? `Gerar código da seleção (${f.selection[0].name})` : 'Selecione um frame no Figma para gerar código'),
+    h('button', { class: 'link-btn', onclick: checkFigma, disabled: !!state.busy }, svgIcon('refresh'), 'Atualizar seleção'),
+    h('details', { class: 'alt' }, h('summary', { text: 'Arquivo só de visualização? Use a API REST' }), tokenForm()));
+}
+
 function statusBar() {
   if (state.busy) return h('div', { class: 'status busy', role: 'status' }, h('span', { class: 'spinner' }), h('span', { id: 'status-text', text: state.busy }));
   if (state.error) return h('div', { class: 'status error', role: 'alert' }, h('span', { text: state.error }), h('button', { class: 'icon-btn', title: 'Fechar', onclick: () => ((state.error = null), render()) }, svgIcon('x')));
@@ -406,10 +531,14 @@ function statusBar() {
 }
 
 function intro() {
+  const figma = state.mode === 'figma';
   return h('section', { class: 'intro' },
-    h('h2', { text: 'Decalque o design desta página' }),
+    h('h2', { text: figma ? 'Decalque um arquivo do Figma' : 'Decalque o design desta página' }),
     h('ul', {},
-      ['Paleta com papéis (fundo, texto, primária…) e variáveis do site', 'Tipografia, espaçamento, raios, sombras e breakpoints', '@keyframes, transições, animações JS e reveals ao rolar', 'Imagens, SVGs, fontes e Lottie no .zip', 'Pinça: qualquer elemento → HTML/CSS e React + Tailwind'].map((t) => h('li', { text: t }))),
+      (figma
+        ? ['Estilos de cor, texto e efeito, com os nomes do arquivo', 'Variáveis com modos (claro/escuro)', 'Transições do protótipo e animações do Figma Motion', 'Frames em PNG, ícones em SVG e imagens originais', 'Seleção → HTML/CSS e React + Tailwind']
+        : ['Paleta com papéis (fundo, texto, primária…) e variáveis do site', 'Tipografia, espaçamento, raios, sombras e breakpoints', '@keyframes, transições, animações JS e reveals ao rolar', 'Imagens, SVGs, fontes e Lottie no .zip', 'Pinça: qualquer elemento → HTML/CSS e React + Tailwind']
+      ).map((t) => h('li', { text: t }))),
     h('p', { class: 'muted small', text: 'Saída: DESIGN.md (pronto para agentes de IA), tokens.css, tema Tailwind v4/v3, tokens W3C e animations.css.' }));
 }
 
@@ -440,7 +569,7 @@ function results(cur) {
 function render() {
   document.getElementById('target').textContent = targetLabel();
   const chipEl = document.getElementById('mode');
-  chipEl.textContent = state.mode === 'blocked' ? '—' : 'Site';
+  chipEl.textContent = state.mode === 'figma' ? 'Figma' : state.mode === 'blocked' ? '—' : 'Site';
   chipEl.dataset.mode = state.mode;
   const app = document.getElementById('app');
   const cur = current();
@@ -458,14 +587,14 @@ function render() {
         render();
       },
       parent: captureParent,
-      again: pickComponent,
+      again: state.mode === 'figma' ? async () => (await checkFigma(), captureFigmaSelection()) : pickComponent,
       downloadCode: downloadCapture,
       downloadZip: downloadCaptureZip,
     })];
   } else if (state.mode === 'blocked') {
-    nodes = [h('section', { class: 'intro' }, h('h2', { text: 'Esta página não pode ser lida' }), h('p', { class: 'muted', text: 'O navegador não deixa extensões lerem páginas internas (chrome://, loja de extensões, PDF). Abra um site.' }))];
+    nodes = [h('section', { class: 'intro' }, h('h2', { text: 'Esta página não pode ser lida' }), h('p', { class: 'muted', text: 'O navegador não deixa extensões lerem páginas internas (chrome://, loja de extensões, PDF). Abra um site ou um arquivo do Figma.' }))];
   } else {
-    nodes = [webControls(), statusBar(), ...(cur.model ? results(cur) : [intro()])];
+    nodes = [state.mode === 'figma' ? figmaControls() : webControls(), statusBar(), ...(cur.model ? results(cur) : [intro()])];
   }
   app.replaceChildren(...nodes.filter(Boolean));
   const activeTab = app.querySelector('nav.tabs button.on');
@@ -493,10 +622,18 @@ if (!FIXED_TAB) {
 }
 chrome.tabs.onUpdated.addListener((tabId, info) => {
   if (!state.tab || tabId !== state.tab.id) return;
+  const before = state.byTab.get(tabId);
   const sameDoc = info.url && pageKey(info.url) === pageKey(state.tab.url);
   if (info.url && !sameDoc) {
     state.byTab.delete(tabId);
+    state.figma = null;
     state.view = 'design';
+  }
+  if (info.url && sameDoc && state.mode === 'figma' && !state.busy) {
+    // no Figma, trocar de página/seleção reescreve ?node-id=: só atualiza a seleção
+    state.tab = { ...state.tab, url: info.url };
+    if (before || state.figma) checkFigma();
+    return;
   }
   if ((info.url && !sameDoc) || info.status === 'complete') refresh();
 });
@@ -507,8 +644,9 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
   } catch {
     /* sem janela */
   }
-  const saved = await chrome.storage.local.get(['opts']);
+  const saved = await chrome.storage.local.get(['opts', 'figmaToken']);
   if (saved.opts) Object.assign(state.opts, saved.opts);
+  state.token = saved.figmaToken || '';
   await refresh();
 })();
 
