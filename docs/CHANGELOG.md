@@ -4,6 +4,7 @@ Mudanças do Decalque, da mais nova para a mais antiga. Cada entrada linka o PR 
 
 ## [Não lançado]
 
+- [#18](https://github.com/VictorNascimento14/Decalque/pull/18) — feat(pinça): gerar HTML/CSS autônomo e componente React + Tailwind · [nota](prs/2026-10-02-pr-18-pinca-codigo.md)
 - [#17](https://github.com/VictorNascimento14/Decalque/pull/17) — feat(pinça): converter estilos computados em classes do Tailwind · [nota](prs/2026-10-02-pr-17-pinca-tailwind.md)
 - [#16](https://github.com/VictorNascimento14/Decalque/pull/16) — feat(pinça): escolher um elemento na página e capturar o estilo dele · [nota](prs/2026-10-02-pr-16-pinca-captura.md)
 - [#15](https://github.com/VictorNascimento14/Decalque/pull/15) — feat(painel): extrair o design de sites pelo painel lateral · [nota](prs/2026-10-02-pr-15-painel-extracao.md)
