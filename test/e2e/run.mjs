@@ -355,10 +355,6 @@ try {
   await step('sem a API do Figma: mostra o passo a passo', async () => {
     const blank = await context.newPage();
     await blank.goto(`http://www.figma.com:${site.port}/design/ZZZ999/Sem-api?mock=0`);
-    await blank.evaluate(() => {
-      delete window.figma;
-      window.figma = undefined;
-    });
     const t = await tabIdOf(`http://www.figma.com:${site.port}/design/ZZZ999/`);
     const p = await openPanel(t);
     await p.waitForSelector('text=A API do Figma ainda não está ativa', { timeout: 15000 });
