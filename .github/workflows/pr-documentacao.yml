@@ -1,0 +1,30 @@
+name: Documentação do PR
+
+# Todo PR linka a nota em docs/prs/. Sem isto, a regra depende de alguém lembrar
+# — e a decisão morre no diff.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  documentacao:
+    name: seção 📓 Documentação
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Conferir o corpo do PR
+        env:
+          CORPO: ${{ github.event.pull_request.body }}
+        run: |
+          if ! printf '%s' "$CORPO" | grep -q '^## 📓 Documentação'; then
+            echo "::error::O corpo do PR precisa da seção '## 📓 Documentação'."
+            exit 1
+          fi
+          if ! printf '%s' "$CORPO" | grep -q 'github.com/VictorNascimento14/Decalque/blob/main/docs/prs/'; then
+            echo "::error::A seção de documentação precisa linkar a nota do PR em docs/prs/."
+            exit 1
+          fi
+          echo "Documentação linkada."
