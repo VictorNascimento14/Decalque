@@ -86,9 +86,11 @@ controla os globais (até `String` e `Array`):
   - texto da página em comentário passa por `cmt()` (sem `*/` nem quebra de linha — senão um `<title>`
     malicioso viraria código no `tailwind.config.js`);
   - dentro de `<style>` o `<` vira `\3c ` (um `content: "</style><script>"` não fecha a tag);
-  - no HTML/JSX da pinça, atributos `on*`, `<script>` de SVG e URL `javascript:`/`vbscript:` não saem — a URL
-    é comparada como o parser a lê, sem espaço, tab nem quebra de linha (`java\tscript:` executa), e
-    `<set>`/`<animate>` que trocam o `href` também caem;
+  - no HTML/JSX da pinça e nos `.svg` do kit, atributos `on*`, `<script>` de SVG e URL `javascript:`/`vbscript:`
+    não saem — a URL é comparada como o parser a lê, sem espaço, tab nem quebra de linha (`java\tscript:`
+    executa), e `<set>`/`<animate>` que trocam o `href` também caem. A regra existe em dois lugares
+    (`safeAttr` em `lib/component.js` e o filtro do `serializeSvg` em `content/extract.js`, script clássico que
+    não importa módulo) e precisa ficar igual nos dois;
   - nenhuma classe do Tailwind sai com aspa dupla: o valor de uma regra `:hover` vem do texto da regra, e um
     `attr(…, " onClick={…} x=")` fecharia o `className="…"`; chave de `style` fora do padrão vai entre aspas;
   - nome e versão de biblioteca lidos no mundo MAIN só com caracteres de versão — uma quebra de linha viraria
@@ -101,6 +103,9 @@ controla os globais (até `String` e `Array`):
   `fetchBytes` (kit, fontes da prévia, fontes da pinça), que vão **sem cookies**; o que precisa de cookie é
   pedido pela própria página. Num redirecionamento para a rede local a resposta é descartada (o pedido já
   saiu). Até 60 folhas de estilo por extração.
+- **Assets no modelo:** o extrator só guarda URL http(s) (`absUrl`), além de `data:`/`blob:`, e o modelo tira
+  o que a regra de rede recusaria (`fetchableUrl` com a URL da página). Um `<img data-src="file:///…">` ou uma
+  imagem da rede local listada por um site público não vira miniatura no painel nem entra no kit.
 - **Token do Figma:** `chrome.storage.local` restrito a contextos confiáveis (content scripts não leem),
   salvo só depois de funcionar, com botão para esquecer; só é enviado para `api.figma.com`.
 - **Figma:** o código injetado só lê (`exportAsync`, `getCSSAsync`, `getBytesAsync`); nenhum setter.

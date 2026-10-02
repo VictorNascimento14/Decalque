@@ -4,7 +4,7 @@
 import { colorName, contrast, isChromatic, isNeutral, oklch, over, parseColor, toHex } from './color.js';
 import {
   easingName, familyStack, firstFamily, guessFamilyKind, isSystemFamily, parseCubicBezier, parseTimeMs, prettyFamily,
-  round, slugify, splitTopLevel, uniqueNamer,
+  fetchableUrl, round, slugify, splitTopLevel, uniqueNamer,
 } from './util.js';
 
 const RADIUS_NAMES = ['xs', 'sm', 'md', 'lg', 'xl', '2xl', '3xl', '4xl'];
@@ -489,12 +489,16 @@ export function buildWebModel(raw, extras = {}) {
   m.components.cards = raw.components.cards;
   m.components.links = raw.components.links;
 
-  m.assets.images = raw.assets.images;
+  // Asset da rede local listado por um site público fica fora (miniatura no painel, kit, @font-face): a mesma
+  // regra de fetchableUrl. De página local (site em desenvolvimento) entra; data: e blob: são da própria página.
+  const allowed = (u) => typeof u === 'string' && (/^(data|blob):/.test(u) || fetchableUrl(u, raw.meta.url) != null);
+  for (const f of m.fonts) f.files = (f.files || []).filter((x) => allowed(x.url));
+  m.assets.images = raw.assets.images.filter((x) => allowed(x.url));
   m.assets.svgs = raw.assets.svgs;
-  m.assets.videos = raw.assets.videos;
-  m.assets.lottie = raw.assets.lottie;
-  m.assets.rive = raw.assets.rive;
-  m.assets.models = raw.assets.models;
+  m.assets.videos = raw.assets.videos.filter((x) => allowed(x.url));
+  m.assets.lottie = raw.assets.lottie.filter(allowed);
+  m.assets.rive = (raw.assets.rive || []).filter(allowed);
+  m.assets.models = (raw.assets.models || []).filter(allowed);
   m.assets.fonts = m.fonts.flatMap((f) => (f.source === 'self' ? f.files : []));
 
   // mainLibs vêm do mundo MAIN, onde a página controla os globais (até String e Array): nome e versão só com

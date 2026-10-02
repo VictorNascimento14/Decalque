@@ -100,3 +100,24 @@ test('bibliotecas do mundo MAIN: nome e versão não injetam Markdown no DESIGN.
   assert.ok(!m.stack.some((s) => /[\n#`<]/.test(`${s.name}${s.version || ''}`)));
   assert.equal(m.stack.filter((s) => !s.name.trim()).length, 0, 'nome vazio é descartado');
 });
+
+test('assets de file:// e da rede local listados por site público ficam fora; de página local, entram', () => {
+  const raw = rawPage();
+  raw.assets.images.push(
+    { url: 'http://192.168.0.1/admin/logo.png', kind: 'img', count: 1, w: 0, h: 0, alt: '' },
+    { url: 'file:///home/u/.ssh/id_rsa', kind: 'img', count: 1, w: 0, h: 0, alt: '' },
+    { url: 'data:image/png;base64,AAAA', kind: 'img', count: 1, w: 0, h: 0, alt: '' },
+  );
+  raw.assets.lottie.push('http://localhost:3000/anim.json');
+  raw.fontFaces.push({ family: 'Inter', weight: '400', style: 'normal', display: '', unicodeRange: '', sources: [{ url: 'http://10.0.0.2/inter.woff2', format: 'woff2' }] });
+  const pub = buildWebModel(raw, { scan: scanResult() });
+  const urls = [...pub.assets.images.map((i) => i.url), ...pub.assets.lottie, ...pub.assets.fonts.map((f) => f.url)];
+  assert.ok(!urls.some((u) => /192\.168|localhost|10\.0\.0\.2|^file:/.test(u)), urls.join('\n'));
+  assert.ok(urls.includes('data:image/png;base64,AAAA'), 'data: é da própria página');
+  assert.ok(urls.includes('https://exemplo.com/hero.webp'));
+
+  const dev = rawPage();
+  dev.meta.url = 'http://localhost:5173/';
+  dev.assets.lottie.push('http://localhost:3000/anim.json');
+  assert.ok(buildWebModel(dev, { scan: scanResult() }).assets.lottie.includes('http://localhost:3000/anim.json'), 'site em desenvolvimento');
+});

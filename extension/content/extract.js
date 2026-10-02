@@ -54,7 +54,12 @@
     const m = /^(-?[\d.]+)(ms|s)$/.exec(String(v || '').trim());
     return m ? Math.round(parseFloat(m[1]) * (m[2] === 's' ? 1000 : 1)) : 0;
   };
-  const absUrl = (u, base) => safe(() => new URL(u, base || document.baseURI).href);
+  // Só http(s): a URL vem da página, e file:, javascript: e afins não são assets — um file:// listado como imagem
+  // ia parar no kit. data: e blob: são tratados à parte por quem chama.
+  const absUrl = (u, base) => safe(() => {
+    const url = new URL(u, base || document.baseURI);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
+  });
   const firstFamily = (stack) => (splitTop(stack)[0] || '').replace(/^["']|["']$/g, '').trim();
   const kebab = (p) =>
     p === 'cssFloat' ? 'float' : p === 'cssOffset' ? 'offset' : p.startsWith('--') ? p : p.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
@@ -541,8 +546,14 @@
     for (const bad of clone.querySelectorAll('script,foreignObject,iframe')) bad.remove();
     for (const node of [clone, ...clone.querySelectorAll('*')]) {
       for (const a of [...node.attributes]) {
-        const unsafeUrl = /href$/i.test(a.name) && /^\s*(javascript|vbscript):/i.test(a.value);
-        if (/^on/i.test(a.name) || unsafeUrl || !/^[A-Za-z_][\w:.-]*$/.test(a.name)) node.removeAttribute(a.name);
+        // mesma regra do safeAttr (lib/component.js), que este script clássico não importa: URL comparada sem
+        // espaço, tab nem quebra de linha (o parser descarta — "java\tscript:" executa), item por item em
+        // values="a;b", e nada de <set>/<animate> trocando o href depois do filtro
+        const v = a.value.replace(/[\u0000-\u0020]/g, '');
+        const urlAttr = /href$/i.test(a.name) || /^(src|to|from|by|values)$/i.test(a.name);
+        const unsafeUrl = urlAttr && v.split(';').some((x) => /^(javascript|vbscript):/i.test(x));
+        const hrefAnim = /^attributename$/i.test(a.name) && /^(xlink:)?href$/i.test(v);
+        if (/^on/i.test(a.name) || unsafeUrl || hrefAnim || !/^[A-Za-z_][\w:.-]*$/.test(a.name)) node.removeAttribute(a.name);
       }
     }
     const w = clone.getAttribute('width');
@@ -863,17 +874,20 @@
       }
     } else if (tag === 'video') {
       const src = el.currentSrc || el.src || safe(() => el.querySelector('source').src);
-      if (src && !src.startsWith('blob:')) S.videos.set(absUrl(src), { url: absUrl(src), poster: el.poster || '' });
+      const url = src && !src.startsWith('blob:') ? absUrl(src) : null;
+      if (url) S.videos.set(url, { url, poster: (el.poster && absUrl(el.poster)) || '' });
       if (el.poster) addImage(S, el.poster, 'poster');
     } else if (tag === 'input' && el.type === 'image') {
       addImage(S, el.src, 'img');
     } else if (/^(lottie-player|dotlottie-player|dotlottie-wc)$/.test(tag)) {
       const src = el.getAttribute('src');
-      if (src) S.lottie.add(absUrl(src));
+      const url = src && absUrl(src);
+      if (url) S.lottie.add(url);
     }
     const lottieSrc = el.getAttribute('data-animation-path') ||
       (el.getAttribute('data-animation-type') === 'lottie' ? el.getAttribute('data-src') : null);
-    if (lottieSrc) S.lottie.add(absUrl(lottieSrc));
+    const lottieUrl = lottieSrc && absUrl(lottieSrc);
+    if (lottieUrl) S.lottie.add(lottieUrl);
 
     const bgi = cs.backgroundImage;
     if (bgi && bgi !== 'none' && bgi.includes('url(')) {

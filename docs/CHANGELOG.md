@@ -4,6 +4,7 @@ Mudanças do Decalque, da mais nova para a mais antiga. Cada entrada linka o PR 
 
 ## [Não lançado]
 
+- [#26](https://github.com/VictorNascimento14/Decalque/pull/26) — fix(extração): barrar file:, rede local e javascript: disfarçado nos assets · [nota](prs/2026-10-02-pr-26-extracao-urls-e-svg.md)
 - [#25](https://github.com/VictorNascimento14/Decalque/pull/25) — docs: escrever o README e a arquitetura · [nota](prs/2026-10-02-pr-25-readme-e-arquitetura.md)
 - [#24](https://github.com/VictorNascimento14/Decalque/pull/24) — test(e2e): rodar a extensão num Chromium real contra site de teste e Figma simulado · [nota](prs/2026-10-02-pr-24-e2e.md)
 - [#23](https://github.com/VictorNascimento14/Decalque/pull/23) — feat(figma): extrair arquivos do Figma e gerar código da seleção pelo painel · [nota](prs/2026-10-02-pr-23-figma-painel.md)

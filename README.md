@@ -79,6 +79,7 @@ View/Collab têm poucas chamadas por mês nos endpoints de arquivo (cada extraç
 - Animações feitas em JavaScript (GSAP, Framer Motion…) só entram se estavam rodando durante a captura
   ou se a varredura com rolagem as disparou. Conteúdo em `<canvas>`/WebGL não vira código.
 - Iframes de outra origem não são lidos. Folhas de estilo bloqueadas aparecem como aviso.
+- Páginas abertas de `file://` são lidas, mas as imagens e fontes delas não entram no kit: só assets http(s).
 - Logos, fotos, ilustrações e fontes têm dono: use como referência e confira licenças antes de publicar.
 
 ## Privacidade
@@ -86,6 +87,7 @@ View/Collab têm poucas chamadas por mês nos endpoints de arquivo (cada extraç
 Tudo roda no seu navegador. As requisições vão para os arquivos que a própria página usa (CSS, imagens,
 fontes), para o Google Fonts quando a prévia tipográfica precisa de uma fonte que não veio com a página (vai
 só o nome da família) e, se você usar token, para `api.figma.com`. Nenhum dado é enviado a outro lugar.
+Endereços `file://` e da rede local que um site público liste como asset ficam fora das miniaturas e do kit.
 
 ## Desenvolvimento
 
