@@ -4,6 +4,7 @@ Mudanças do Decalque, da mais nova para a mais antiga. Cada entrada linka o PR 
 
 ## [Não lançado]
 
+- [#21](https://github.com/VictorNascimento14/Decalque/pull/21) — feat(figma): montar o design system do Figma com estilos, variáveis, molas e Motion · [nota](prs/2026-10-02-pr-21-figma-modelo.md)
 - [#20](https://github.com/VictorNascimento14/Decalque/pull/20) — feat(figma): analisar arquivos do Figma no formato da API REST · [nota](prs/2026-10-02-pr-20-figma-scan.md)
 - [#19](https://github.com/VictorNascimento14/Decalque/pull/19) — feat(pinça): capturar componentes pelo painel com prévia e código · [nota](prs/2026-10-02-pr-19-pinca-painel.md)
 - [#18](https://github.com/VictorNascimento14/Decalque/pull/18) — feat(pinça): gerar HTML/CSS autônomo e componente React + Tailwind · [nota](prs/2026-10-02-pr-18-pinca-codigo.md)
