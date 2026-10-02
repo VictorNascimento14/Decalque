@@ -38,8 +38,10 @@ partir da v137, ignora `--load-extension`. `scripts/browser.mjs` acha o navegado
    `<img src="data:…">`.
 2. **Texto da página em comentário de arquivo gerado passa por `cmt()`** (sem `*/`, sem quebra de linha).
    Um `<title>` com `*/` virava código executável no `tailwind.config.js`.
-3. **Dentro de `<style>` gerado, `<` vira `\3c `**; atributos `on*`, `href="javascript:"` e `<script>` de
-   SVG não saem em HTML, JSX nem `.svg`.
+3. **Dentro de `<style>` gerado, `<` vira `\3c `**; atributos `on*`, URL `javascript:` e `<script>` de SVG
+   não saem em HTML, JSX nem `.svg`. A URL é comparada sem espaço, tab nem quebra de linha (`java\tscript:`
+   executa) e `<set>`/`<animate>` com `attributeName="href"` caem. A regra vive em `safeAttr`
+   (`lib/component.js`) **e** no `serializeSvg` (`content/extract.js`): mudou uma, mude a outra.
 4. **Content script não faz fetch entre origens**: pede ao service worker (`background.js`), que tem
    timeout e teto de tamanho.
 5. **Toda busca a pedido da página passa por `fetchableUrl`** (`lib/util.js`): só http(s), e rede local só

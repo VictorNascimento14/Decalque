@@ -58,6 +58,11 @@ p { margin: 0 0 16px; color: #a1a1aa; }
   <div class="spinner"></div>
   <div id="waapi" style="width:20px;height:20px;background:#7c3aed"></div>
   <lottie-player src="/anim.json"></lottie-player>
+  <!-- não são assets: file: e javascript: (inclusive disfarçado) não podem entrar no modelo nem no kit -->
+  <img data-src="file:///etc/hostname" alt="" width="8" height="8">
+  <div style="width:8px;height:8px;background-image:url('javascript:alert(1)')"></div>
+  <lottie-player src="file:///tmp/anim.json"></lottie-player>
+  <svg class="evil" width="24" height="24" viewBox="0 0 24 24"><a xlink:href="java&#9;script:alert(1)"><set attributeName="href" to="javascript:alert(2)"/><circle cx="12" cy="12" r="10"/></a></svg>
   <div class="spacer"></div>
   <section class="grid">
     <div class="card reveal"><h3>Revelado 1</h3></div>

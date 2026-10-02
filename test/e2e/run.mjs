@@ -198,6 +198,12 @@ try {
     assert.match(star.markup, /xmlns="http:\/\/www\.w3\.org\/2000\/svg"/);
     assert.ok(model.assets.lottie.some((u) => u.endsWith('/anim.json')));
     assert.ok(model.stack.some((s) => s.name === 'Lottie'));
+    // file: e javascript: não entram; SVG sem javascript: disfarçado nem <set> trocando o href
+    const all = [...urls, ...model.assets.lottie, ...model.assets.videos.map((v) => v.url)];
+    assert.deepEqual(all.filter((u) => !/^(https?:|data:|blob:)/.test(u)), []);
+    const evil = model.assets.svgs.find((s) => /<circle/.test(s.markup));
+    assert.ok(evil, `svgs: ${model.assets.svgs.map((s) => s.name)}`);
+    assert.doesNotMatch(evil.markup, /script:|attributeName="(xlink:)?href"/i);
   });
 
   await step('todas as abas do painel renderizam', async () => {
