@@ -1,0 +1,14 @@
+{
+  "name": "decalque",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Extensão de navegador que decalca o design system de qualquer site ou arquivo do Figma.",
+  "type": "module",
+  "scripts": {
+    "lint": "node scripts/check-syntax.mjs",
+    "test": "node --test \"test/unit/**/*.test.js\""
+  },
+  "devDependencies": {
+    "playwright": "1.59.1"
+  }
+}
