@@ -10,6 +10,7 @@ import {
 const RADIUS_NAMES = ['xs', 'sm', 'md', 'lg', 'xl', '2xl', '3xl', '4xl'];
 const SHADOW_NAMES = ['xs', 'sm', 'md', 'lg', 'xl', '2xl', '3xl'];
 const BREAKPOINT_NAMES = ['sm', 'md', 'lg', 'xl', '2xl', '3xl'];
+const LIB_KINDS = new Set(['motion', 'ui', 'lib', 'framework', 'builder']);
 
 export function emptyModel(source) {
   return {
@@ -496,11 +497,16 @@ export function buildWebModel(raw, extras = {}) {
   m.assets.models = raw.assets.models;
   m.assets.fonts = m.fonts.flatMap((f) => (f.source === 'self' ? f.files : []));
 
+  // mainLibs vêm do mundo MAIN, onde a página controla os globais (até String e Array): nome e versão só com
+  // caracteres de nome/versão — uma quebra de linha numa versão viraria uma seção nova no DESIGN.md.
   const stack = [...raw.stack];
-  for (const lib of extras.mainLibs || []) {
-    const hit = stack.find((s) => s.name.toLowerCase() === lib.name.toLowerCase());
-    if (hit) hit.version = lib.version || hit.version;
-    else stack.push(lib);
+  for (const lib of (Array.isArray(extras.mainLibs) ? extras.mainLibs : []).slice(0, 40)) {
+    const name = lib && typeof lib.name === 'string' ? lib.name.replace(/[^\w .+-]/g, '').slice(0, 40).trim() : '';
+    if (!name) continue;
+    const version = (lib.version != null && String(lib.version).replace(/[^\w.+-]/g, '').slice(0, 32)) || null;
+    const hit = stack.find((s) => s.name.toLowerCase() === name.toLowerCase());
+    if (hit) hit.version = version || hit.version;
+    else stack.push({ name, version, kind: LIB_KINDS.has(lib.kind) ? lib.kind : 'lib', evidence: 'objeto global na página' });
   }
   m.stack = stack;
 
