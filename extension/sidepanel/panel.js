@@ -1,10 +1,12 @@
 // Controlador do painel lateral: acompanha a aba ativa, injeta os scripts e desenha as telas.
 
 import { buildWebModel } from '../lib/model.js';
-import { hostOf, slugify } from '../lib/util.js';
-import { copyText, downloadBlob, h, svgIcon, toast } from './dom.js';
+import { globalCss, renderCSS, renderDocument, renderHTML, renderJSX, componentName } from '../lib/component.js';
+import { createZip } from '../lib/zip.js';
+import { hostOf, slugify, stamp } from '../lib/util.js';
+import { base64ToBytes, bytesToBase64, copyText, downloadBlob, h, svgIcon, toast } from './dom.js';
 import { buildKit, fetchBytes, textFiles } from './kit.js';
-import { SECTIONS, renderSection } from './views.js';
+import { SECTIONS, renderComponentView, renderSection } from './views.js';
 
 const params = new URLSearchParams(location.search);
 const FIXED_TAB = params.has('tab') ? Number(params.get('tab')) : null; // painel aberto numa aba comum (testes)
@@ -18,6 +20,11 @@ const state = {
   section: 'overview',
   byTab: new Map(),
   opts: { scroll: true, includeVideos: false },
+  view: 'design',
+  capture: null,
+  captureCode: null,
+  captureTab: 'jsx',
+  picking: false,
   fonts: new Map(),
   filesCache: new WeakMap(),
 };
@@ -122,7 +129,12 @@ async function refresh() {
   const changed = !state.tab || !tab || tab.id !== state.tab.id;
   state.tab = tab;
   state.mode = modeFor(tab);
-  if (changed) state.error = null;
+  if (changed) {
+    if (state.picking) cancelPick();
+    state.view = 'design';
+    state.capture = null;
+    state.error = null;
+  }
   render();
 }
 
@@ -175,6 +187,81 @@ async function extractWeb() {
   });
 }
 
+async function pickComponent() {
+  const tab = state.tab;
+  state.error = null;
+  try {
+    await inject(tab.id, ['content/extract.js', 'content/capture.js']);
+  } catch (e) {
+    state.error = String(e.message || e);
+    render();
+    return;
+  }
+  state.picking = true;
+  state.pickTabId = tab.id;
+  render();
+  try {
+    const cap = await callContent(tab.id, 'pick', [{ max: 1500 }]);
+    if (cap && cap.error) throw new Error(cap.error);
+    if (cap) showCapture(cap);
+  } catch (e) {
+    state.error = String(e.message || e);
+  } finally {
+    state.picking = false;
+    state.pickTabId = null;
+    render();
+  }
+}
+
+// cancela na aba onde a pinça foi aberta (o usuário pode ter trocado de aba)
+async function cancelPick() {
+  if (state.pickTabId == null) return;
+  try {
+    await callContent(state.pickTabId, 'cancelPick');
+  } catch {
+    /* a aba fechou ou navegou */
+  }
+}
+
+async function captureParent() {
+  await run('Capturando o elemento pai…', async () => {
+    const cap = await callContent(state.tab.id, 'captureRelative', ['parent', { max: 1500 }]);
+    showCapture(cap);
+  });
+}
+
+function showCapture(cap) {
+  state.capture = cap;
+  state.captureCode = null;
+  state.captureFonts = null;
+  state.view = 'component';
+  inlineCaptureFonts(cap);
+}
+
+// A prévia roda num iframe sem origem: fonte de outro servidor sem CORS não carrega.
+// Embute as fontes como data: na prévia e no .html baixado (não no CSS copiado).
+async function inlineCaptureFonts(cap) {
+  const urls = [...new Set((cap.fontFaces || []).flatMap((f) => [...f.matchAll(/url\("([^"]+)"\)/g)].map((m) => m[1])))]
+    .filter((u) => /^https?:/.test(u))
+    .slice(0, 12);
+  if (!urls.length) return;
+  const map = {};
+  await Promise.all(urls.map(async (u) => {
+    try {
+      // URL da página e bytes que vão para o .html baixado: mesma regra do kit (fetchableUrl + redirecionamento)
+      const { bytes, type } = await fetchBytes(u, null, cap.source && cap.source.url);
+      if (bytes.length > 3 * 1024 * 1024) return;
+      map[u] = `data:${type || 'font/woff2'};base64,${bytesToBase64(bytes)}`;
+    } catch {
+      /* fica a URL original */
+    }
+  }));
+  if (state.capture !== cap || !Object.keys(map).length) return;
+  state.captureFonts = map;
+  state.captureCode = null;
+  if (state.view === 'component') render();
+}
+
 // ------------------------------------------------------------------ exportação
 async function downloadKit() {
   const cur = current();
@@ -205,6 +292,46 @@ function files(model) {
 function downloadText(name, text) {
   const type = name.endsWith('.json') ? 'application/json' : name.endsWith('.md') ? 'text/markdown' : name.endsWith('.js') ? 'text/javascript' : 'text/css';
   downloadBlob(new Blob([text], { type: `${type};charset=utf-8` }), name);
+}
+
+function captureCode() {
+  if (!state.captureCode) {
+    const cap = state.capture;
+    const assetUrls = Object.fromEntries((cap.assets || []).map((a) => [a.name, `data:${a.mime};base64,${a.base64}`]));
+    const fonts = state.captureFonts || {};
+    const embedded = { ...cap, fontFaces: (cap.fontFaces || []).map((f) => f.replace(/url\("([^"]+)"\)/g, (m, u) => (fonts[u] ? `url("${fonts[u]}")` : m))) };
+    state.captureCode = {
+      html: renderHTML(cap),
+      css: [globalCss(cap), renderCSS(cap)].filter(Boolean).join('\n\n'),
+      jsx: renderJSX(cap),
+      doc: renderDocument(embedded),
+      // sem as fontes embutidas ainda, a prévia usa fallback (evita o bloqueio de CORS no iframe sem origem)
+      preview: renderDocument(state.captureFonts ? embedded : { ...cap, fontFaces: [] }, { assetUrls }),
+    };
+  }
+  return state.captureCode;
+}
+
+function downloadCapture(tab) {
+  const code = captureCode();
+  const base = slugify(state.capture.root.description) || 'componente';
+  if (tab === 'jsx') downloadBlob(new Blob([code.jsx], { type: 'text/javascript' }), `${componentName(state.capture)}.jsx`);
+  else if (tab === 'css') downloadBlob(new Blob([code.css], { type: 'text/css' }), `${base}.css`);
+  else downloadBlob(new Blob([code.doc], { type: 'text/html' }), `${base}.html`);
+}
+
+function downloadCaptureZip() {
+  const cap = state.capture;
+  const code = captureCode();
+  const base = slugify(cap.root.description) || 'componente';
+  const root = `decalque-${base}-${stamp()}`;
+  const list = [
+    { name: `${root}/${base}.html`, data: code.doc },
+    { name: `${root}/${base}.css`, data: code.css },
+    { name: `${root}/${componentName(cap)}.jsx`, data: code.jsx },
+    ...(cap.assets || []).map((a) => ({ name: `${root}/assets/${a.name}`, data: base64ToBytes(a.base64) })),
+  ];
+  downloadBlob(createZip(list), `${root}.zip`);
 }
 
 // ------------------------------------------------------------------ fontes na prévia
@@ -266,8 +393,10 @@ function checkbox(key, label) {
 function webControls() {
   const cur = current();
   return h('section', { class: 'controls' },
-    h('button', { class: 'primary wide', id: 'extract', onclick: extractWeb, disabled: !!state.busy }, svgIcon('wand'), cur.model ? 'Extrair de novo' : 'Extrair design desta página'),
-    checkbox('scroll', 'Rolar a página para pegar animações de rolagem e imagens lazy'));
+    h('button', { class: 'primary wide', id: 'extract', onclick: extractWeb, disabled: !!state.busy || state.picking }, svgIcon('wand'), cur.model ? 'Extrair de novo' : 'Extrair design desta página'),
+    checkbox('scroll', 'Rolar a página para pegar animações de rolagem e imagens lazy'),
+    h('button', { class: 'ghost wide', id: 'pick', onclick: state.picking ? cancelPick : pickComponent, disabled: !!state.busy }, svgIcon(state.picking ? 'x' : 'target'), state.picking ? 'Cancelar seleção' : 'Capturar componente'),
+    state.picking ? h('p', { class: 'hint', text: 'Passe o mouse e clique no elemento. Depois de clicar na página, ↑/↓ sobem ou descem um nível e Esc cancela.' }) : null);
 }
 
 function statusBar() {
@@ -280,7 +409,7 @@ function intro() {
   return h('section', { class: 'intro' },
     h('h2', { text: 'Decalque o design desta página' }),
     h('ul', {},
-      ['Paleta com papéis (fundo, texto, primária…) e variáveis do site', 'Tipografia, espaçamento, raios, sombras e breakpoints', '@keyframes, transições, animações JS e reveals ao rolar', 'Imagens, SVGs, fontes e Lottie no .zip'].map((t) => h('li', { text: t }))),
+      ['Paleta com papéis (fundo, texto, primária…) e variáveis do site', 'Tipografia, espaçamento, raios, sombras e breakpoints', '@keyframes, transições, animações JS e reveals ao rolar', 'Imagens, SVGs, fontes e Lottie no .zip', 'Pinça: qualquer elemento → HTML/CSS e React + Tailwind'].map((t) => h('li', { text: t }))),
     h('p', { class: 'muted small', text: 'Saída: DESIGN.md (pronto para agentes de IA), tokens.css, tema Tailwind v4/v3, tokens W3C e animations.css.' }));
 }
 
@@ -316,7 +445,24 @@ function render() {
   const app = document.getElementById('app');
   const cur = current();
   let nodes;
-  if (state.mode === 'blocked') {
+  if (state.view === 'component' && state.capture) {
+    const code = captureCode();
+    nodes = [statusBar(), ...renderComponentView(state.capture, {
+      code, tab: state.captureTab, previewDoc: code.preview, busy: state.busy,
+      setTab: (t) => {
+        state.captureTab = t;
+        render();
+      },
+      back: () => {
+        state.view = 'design';
+        render();
+      },
+      parent: captureParent,
+      again: pickComponent,
+      downloadCode: downloadCapture,
+      downloadZip: downloadCaptureZip,
+    })];
+  } else if (state.mode === 'blocked') {
     nodes = [h('section', { class: 'intro' }, h('h2', { text: 'Esta página não pode ser lida' }), h('p', { class: 'muted', text: 'O navegador não deixa extensões lerem páginas internas (chrome://, loja de extensões, PDF). Abra um site.' }))];
   } else {
     nodes = [webControls(), statusBar(), ...(cur.model ? results(cur) : [intro()])];
@@ -325,7 +471,7 @@ function render() {
   const activeTab = app.querySelector('nav.tabs button.on');
   if (activeTab) activeTab.scrollIntoView({ inline: 'nearest', block: 'nearest' });
   const dock = document.getElementById('dock');
-  dock.hidden = !(cur.model && state.mode !== 'blocked');
+  dock.hidden = !(cur.model && state.view === 'design' && state.mode !== 'blocked');
   document.getElementById('zip').disabled = !!state.busy;
 }
 
@@ -348,7 +494,10 @@ if (!FIXED_TAB) {
 chrome.tabs.onUpdated.addListener((tabId, info) => {
   if (!state.tab || tabId !== state.tab.id) return;
   const sameDoc = info.url && pageKey(info.url) === pageKey(state.tab.url);
-  if (info.url && !sameDoc) state.byTab.delete(tabId);
+  if (info.url && !sameDoc) {
+    state.byTab.delete(tabId);
+    state.view = 'design';
+  }
   if ((info.url && !sameDoc) || info.status === 'complete') refresh();
 });
 

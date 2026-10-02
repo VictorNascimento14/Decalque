@@ -388,3 +388,28 @@ export function renderSection(id, model, ctx) {
   const map = { overview, colors, type: typography, layout, effects, motion, components, assets, export: exporter };
   return (map[id] || overview)(model, ctx).filter(Boolean);
 }
+
+// ------------------------------------------------------------------ componente capturado
+export function renderComponentView(cap, ctx) {
+  const tabs = [['html', 'HTML'], ['css', 'CSS'], ['jsx', 'React + Tailwind']];
+  const code = ctx.code[ctx.tab];
+  const frame = h('iframe', { class: 'preview', sandbox: '', title: 'Prévia do componente' });
+  frame.srcdoc = ctx.previewDoc;
+  const isFig = cap.source.kind === 'figma';
+  return [
+    h('div', { class: 'cap-head' },
+      h('button', { class: 'ghost small-btn', onclick: ctx.back }, svgIcon('back'), 'Voltar'),
+      h('div', { class: 'cap-title' }, h('strong', { text: cap.root.description || 'Componente' }), h('span', { class: 'muted small', text: `${cap.root.width}×${cap.root.height}px · ${cap.stats.nodes} nós${cap.stats.truncated ? ' (cortado)' : ''}${cap.states?.length ? ` · ${cap.states.length} estados` : ''}` }))),
+    h('div', { class: 'preview-wrap' }, frame),
+    h('div', { class: 'cap-actions' },
+      isFig ? null : h('button', { class: 'ghost small-btn', onclick: ctx.parent, disabled: !!ctx.busy }, svgIcon('up'), 'Pai'),
+      h('button', { class: 'ghost small-btn', onclick: ctx.again, disabled: !!ctx.busy }, svgIcon('target'), isFig ? 'Capturar seleção de novo' : 'Capturar outro'),
+      h('button', { class: 'ghost small-btn', onclick: ctx.downloadZip }, svgIcon('download'), '.zip')),
+    h('div', { class: 'tabs small-tabs', role: 'tablist' }, tabs.map(([id, label]) => h('button', { role: 'tab', 'aria-selected': String(ctx.tab === id), class: ctx.tab === id ? 'on' : '', onclick: () => ctx.setTab(id) }, label))),
+    h('div', { class: 'code-wrap' },
+      h('pre', { class: 'code' }, h('code', { text: code })),
+      h('div', { class: 'code-actions' },
+        h('button', { class: 'primary', onclick: () => copyText(code, 'Código copiado') }, svgIcon('copy'), 'Copiar'),
+        h('button', { class: 'ghost', onclick: () => ctx.downloadCode(ctx.tab) }, svgIcon('download'), 'Baixar'))),
+  ];
+}
