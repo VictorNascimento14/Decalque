@@ -1593,6 +1593,9 @@
     };
   };
 
+  // usados por content/capture.js
+  D.util = { round, splitTop, normColor, describe, safe, parsedStates, declsFromCss, mediaOk, firstFamily, serializeSvg, readSheets, timeMs, parseSrcset, UI_ATTR, SKIP };
+
   // Busca binária pedida pelo painel quando o fetch da extensão falha (cookies/Referer da própria página).
   D.fetchAsBase64 = async (url) => {
     const res = await fetch(url, { credentials: 'include' });
