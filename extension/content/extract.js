@@ -1179,6 +1179,49 @@
     return [...map].map(([px, count]) => ({ px, count })).sort((a, b) => a.px - b.px);
   }
 
+  // ---------------------------------------------------------------- animações em execução
+  function runningAnimations() {
+    const out = [];
+    const list = safe(() => document.getAnimations(), []);
+    for (const a of list.slice(0, 400)) {
+      try {
+        const eff = a.effect;
+        const target = eff && eff.target;
+        if (target && target.closest && target.closest(`[${UI_ATTR}]`)) continue;
+        const t = eff ? eff.getTiming() : {};
+        const base = {
+          target: target ? describe(target) : null,
+          duration: typeof t.duration === 'number' ? Math.round(t.duration) : 0,
+          delay: Math.round(t.delay || 0),
+          iterations: t.iterations === Infinity ? 'infinite' : t.iterations,
+          easing: t.easing,
+          direction: t.direction,
+          fill: t.fill,
+        };
+        if (typeof CSSAnimation !== 'undefined' && a instanceof CSSAnimation) out.push({ kind: 'css', name: a.animationName, ...base });
+        else if (typeof CSSTransition !== 'undefined' && a instanceof CSSTransition) out.push({ kind: 'transition', property: a.transitionProperty, ...base });
+        else {
+          const frames = eff && eff.getKeyframes ? eff.getKeyframes() : [];
+          out.push({
+            kind: 'waapi',
+            keyframes: frames.slice(0, 30).map((f) => {
+              const o = { offset: round(f.computedOffset != null ? f.computedOffset : f.offset || 0, 4) };
+              if (f.easing && f.easing !== 'linear') o.easing = f.easing;
+              for (const k of Object.keys(f)) {
+                if (!['offset', 'computedOffset', 'easing', 'composite'].includes(k) && f[k] != null) o[kebab(k)] = String(f[k]);
+              }
+              return o;
+            }),
+            ...base,
+          });
+        }
+      } catch {
+        /* animação já terminou */
+      }
+    }
+    return out;
+  }
+
   // ---------------------------------------------------------------- bibliotecas e stack (sinais do DOM)
   function detectStack(S, css, vars) {
     const found = [];
@@ -1352,6 +1395,7 @@
         const [name, durationMs, easing, delayMs, iterations, direction, fillMode, timeline] = key.split('|');
         return { name, durationMs: +durationMs, easing, delayMs: +delayMs, iterations, direction, fillMode, timeline, count: v.count, example: v.example };
       }).sort((a, b) => b.count - a.count).slice(0, 80),
+      running: runningAnimations(),
       components: {
         buttons: component(S.buttons, 6),
         inputs: component(S.inputs, 4),
@@ -1370,6 +1414,183 @@
     };
     result.meta.ms.total = Math.round(performance.now() - t0);
     return result;
+  };
+
+  // ---------------------------------------------------------------- varredura com rolagem (reveals)
+  function parseTransform(t) {
+    const out = { tx: 0, ty: 0, sx: 1, sy: 1, rot: 0 };
+    if (!t || t === 'none') return out;
+    let m = /^matrix\(([^)]+)\)$/.exec(t);
+    if (m) {
+      const [a, b, c, d, e, f] = m[1].split(',').map(Number);
+      return { tx: e, ty: f, sx: Math.hypot(a, b), sy: Math.hypot(c, d), rot: (Math.atan2(b, a) * 180) / Math.PI };
+    }
+    m = /^matrix3d\(([^)]+)\)$/.exec(t);
+    if (m) {
+      const v = m[1].split(',').map(Number);
+      return { tx: v[12], ty: v[13], sx: Math.hypot(v[0], v[1]), sy: Math.hypot(v[4], v[5]), rot: (Math.atan2(v[1], v[0]) * 180) / Math.PI };
+    }
+    return out;
+  }
+
+  function motionState(cs) {
+    const t = parseTransform(cs.transform);
+    if (cs.translate && cs.translate !== 'none') {
+      const [x, y] = cs.translate.split(/\s+/).map((v) => parseFloat(v) || 0);
+      t.tx += x || 0;
+      t.ty += y || 0;
+    }
+    if (cs.scale && cs.scale !== 'none') {
+      const [x, y] = cs.scale.split(/\s+/).map(Number);
+      t.sx *= x;
+      t.sy *= y == null || Number.isNaN(y) ? x : y;
+    }
+    if (cs.rotate && cs.rotate !== 'none') t.rot += parseFloat(cs.rotate) || 0;
+    const blur = /blur\(([\d.]+)px\)/.exec(cs.filter || '');
+    return {
+      opacity: round(parseFloat(cs.opacity), 3),
+      tx: round(t.tx, 1), ty: round(t.ty, 1), sx: round(t.sx, 3), sy: round(t.sy, 3), rot: round(t.rot, 1),
+      blur: blur ? +blur[1] : 0,
+      clip: cs.clipPath && cs.clipPath !== 'none' ? cs.clipPath : 'none',
+    };
+  }
+
+  const looksHidden = (s) =>
+    s.opacity < 0.98 || Math.abs(s.tx) > 2 || Math.abs(s.ty) > 2 || Math.abs(s.sx - 1) > 0.01 || s.blur > 0 || s.clip !== 'none' || Math.abs(s.rot) > 1;
+
+  const revealHint = (el) =>
+    el.hasAttribute('data-aos') || el.hasAttribute('data-sal') || el.hasAttribute('data-animate') ||
+    el.hasAttribute('data-scroll') || /(^|\s)(wow|reveal|aos-|animate__|fade|sr-|in-view)/.test(classAttr(el));
+
+  const revealScore = (s) => s.opacity - Math.abs(s.ty) / 200 - Math.abs(s.tx) / 200 - Math.abs(1 - s.sx) - s.blur / 20;
+
+  function classify(from, to) {
+    const dy = from.ty - to.ty;
+    const dx = from.tx - to.tx;
+    const fade = from.opacity < to.opacity - 0.2;
+    if (Math.abs(dy) >= 6 && Math.abs(dy) >= Math.abs(dx)) return `${fade ? 'fade' : 'slide'}-${dy > 0 ? 'up' : 'down'}`;
+    if (Math.abs(dx) >= 6) return `${fade ? 'fade' : 'slide'}-${dx > 0 ? 'left' : 'right'}`;
+    if (from.sx < to.sx - 0.02) return fade ? 'zoom-in' : 'scale-up';
+    if (from.sx > to.sx + 0.02) return fade ? 'zoom-out' : 'scale-down';
+    if (from.blur > to.blur) return 'blur-in';
+    if (from.clip !== to.clip) return 'clip-reveal';
+    if (Math.abs(from.rot - to.rot) >= 3) return 'rotate-in';
+    if (fade) return 'fade-in';
+    return null;
+  }
+
+  function pickScroller() {
+    const se = document.scrollingElement || document.documentElement;
+    if (se.scrollHeight > innerHeight + 80) return { el: null, max: se.scrollHeight - innerHeight };
+    let best = null;
+    for (const el of document.querySelectorAll('body *')) {
+      if (el.scrollHeight - el.clientHeight < 200 || el.clientHeight < innerHeight * 0.5) continue;
+      const oy = getComputedStyle(el).overflowY;
+      if ((oy === 'auto' || oy === 'scroll') && (!best || el.scrollHeight > best.scrollHeight)) best = el;
+    }
+    return best ? { el: best, max: best.scrollHeight - best.clientHeight } : { el: null, max: 0 };
+  }
+
+  D.scrollScan = async ({ steps = 24, delay = 260 } = {}) => {
+    const scroller = pickScroller();
+    const getY = () => (scroller.el ? scroller.el.scrollTop : scrollY);
+    const setY = (y) => (scroller.el ? (scroller.el.scrollTop = y) : scrollTo({ top: y, left: scrollX, behavior: 'instant' }));
+    const startY = getY();
+    const before = new Map();
+    const all = document.body ? document.body.getElementsByTagName('*') : [];
+    for (let i = 0; i < all.length && before.size < 3000; i++) {
+      const el = all[i];
+      if (SKIP.has(el.localName) || el.closest(`[${UI_ATTR}]`)) continue;
+      const cs = getComputedStyle(el);
+      if (cs.display === 'none') continue;
+      const s = motionState(cs);
+      if (looksHidden(s) || revealHint(el)) before.set(el, s);
+    }
+    const seen = new Set();
+    const best = new Map();
+    const touched = new Map();
+    const classAdds = new Map();
+    const io = new IntersectionObserver((entries) => {
+      for (const e of entries) if (e.isIntersecting) seen.add(e.target);
+    }, { threshold: 0.05 });
+    before.forEach((_, el) => io.observe(el));
+    const mo = new MutationObserver((muts) => {
+      const now = performance.now();
+      for (const m of muts) {
+        const el = m.target;
+        if (!before.has(el)) continue;
+        if (m.attributeName === 'class') {
+          const old = new Set((m.oldValue || '').split(/\s+/));
+          const added = [...el.classList].filter((c) => !old.has(c));
+          if (added.length) classAdds.set(el, added.slice(0, 3));
+        } else {
+          const r = touched.get(el) || { first: now, last: now, n: 0 };
+          r.last = now;
+          r.n++;
+          touched.set(el, r);
+        }
+      }
+    });
+    mo.observe(document.documentElement, { subtree: true, attributes: true, attributeOldValue: true, attributeFilter: ['class', 'style'] });
+    const anims = new Map();
+    const grab = () => {
+      for (const a of runningAnimations()) {
+        const key = JSON.stringify([a.kind, a.name || a.property || '', a.keyframes || '', a.duration, a.easing]);
+        if (!anims.has(key)) anims.set(key, a);
+      }
+    };
+    const sample = () => {
+      for (const el of seen) {
+        const s = motionState(getComputedStyle(el));
+        const prev = best.get(el);
+        if (!prev || revealScore(s) >= revealScore(prev)) best.set(el, s);
+      }
+    };
+    try {
+      grab();
+      for (let i = 1; i <= steps; i++) {
+        setY((scroller.max * i) / steps);
+        progress(`Rolando a página para pegar animações… ${Math.round((i / steps) * 100)}%`);
+        await sleep(delay);
+        sample();
+        grab();
+      }
+      await sleep(800);
+      sample();
+      grab();
+    } finally {
+      io.disconnect();
+      mo.disconnect();
+      setY(startY);
+    }
+    const groups = new Map();
+    for (const [el, after] of best) {
+      const from = before.get(el);
+      if (!from) continue;
+      const pattern = classify(from, after);
+      if (!pattern) continue;
+      const cs = getComputedStyle(el);
+      if (/infinite/.test(cs.animationIterationCount)) continue;
+      const t = touched.get(el);
+      // estilo inline mexido o tempo todo sem mudar a opacidade = marquee/parallax, não reveal
+      if (t && t.n > 30 && Math.abs(from.opacity - after.opacity) < 0.2) continue;
+      const trigger = classAdds.has(el) ? `classe .${classAdds.get(el).join('.')}` : t ? 'JS (estilo inline)' : cs.animationName !== 'none' ? 'animação CSS' : 'CSS';
+      const durationMs = t && t.last > t.first
+        ? Math.round(t.last - t.first)
+        : timeMs(splitTop(cs.transitionDuration)[0]) || timeMs(splitTop(cs.animationDuration)[0]);
+      const easing = cs.transitionDuration !== '0s' ? splitTop(cs.transitionTimingFunction)[0] : cs.animationName !== 'none' ? splitTop(cs.animationTimingFunction)[0] : null;
+      const fromKey = [Math.round(from.opacity * 10), Math.round(from.ty / 10), Math.round(from.tx / 10), Math.round(from.sx * 20), from.blur > 0].join(',');
+      const key = [pattern, fromKey, trigger.split(' ')[0], Math.round((durationMs || 0) / 150)].join('|');
+      let g = groups.get(key);
+      if (!g) groups.set(key, (g = { pattern, from, to: after, trigger, durationMs, easing, count: 0, examples: [] }));
+      g.count++;
+      if (g.examples.length < 3) g.examples.push(describe(el));
+    }
+    return {
+      reveals: [...groups.values()].sort((a, b) => b.count - a.count).slice(0, 14),
+      running: [...anims.values()].slice(0, 120),
+      scrolled: Math.round(scroller.max),
+    };
   };
 
   // Busca binária pedida pelo painel quando o fetch da extensão falha (cookies/Referer da própria página).
