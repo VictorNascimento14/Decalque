@@ -4,6 +4,7 @@ Mudanças do Decalque, da mais nova para a mais antiga. Cada entrada linka o PR 
 
 ## [Não lançado]
 
+- [#13](https://github.com/VictorNascimento14/Decalque/pull/13) — feat(painel): telas de resultado do design extraído · [nota](prs/2026-10-02-pr-13-painel-telas.md)
 - [#12](https://github.com/VictorNascimento14/Decalque/pull/12) — feat(painel): estilos do painel lateral com tema claro e escuro · [nota](prs/2026-10-02-pr-12-painel-estilos.md)
 - [#11](https://github.com/VictorNascimento14/Decalque/pull/11) — feat(exportação): gerar animations.css, reveal.js e DESIGN.md · [nota](prs/2026-10-02-pr-11-exportar-design-md.md)
 - [#10](https://github.com/VictorNascimento14/Decalque/pull/10) — feat(exportação): gerar tokens em CSS, Tailwind v4/v3 e W3C DTCG · [nota](prs/2026-10-02-pr-10-exportar-tokens.md)
