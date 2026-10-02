@@ -78,6 +78,18 @@
   }
 
   // Content scripts não fazem fetch entre origens (CORS); o service worker faz por nós.
+  let fetchBudget = 0;
+  async function fetchText(url) {
+    // teto por extração: @import encadeado não vira varredura
+    if (++fetchBudget > 60) return null;
+    try {
+      const res = await chrome.runtime.sendMessage({ type: 'decalque:fetch', url });
+      return res && typeof res.text === 'string' ? res.text : null;
+    } catch {
+      return null;
+    }
+  }
+
   // ---------------------------------------------------------------- cores
   // Valores computados chegam como rgb()/rgba() ou, em cores modernas, oklch()/lab()/color().
   // As modernas passam por um canvas 1×1, que devolve o sRGB exato.
@@ -150,6 +162,339 @@
     return out;
   }
 
+  // ---------------------------------------------------------------- folhas de estilo
+  async function readSheets(shadowRoots) {
+    const out = {
+      vars: [], keyframes: new Map(), fontFaces: [], media: new Map(), container: 0, imports: [],
+      properties: [], stateRules: [], referenced: new Set(), total: 0, blocked: [],
+    };
+    const seen = new Set();
+    const jobs = [];
+    for (const root of [document, ...shadowRoots]) {
+      for (const sheet of safe(() => [...root.styleSheets], [])) jobs.push(readSheet(sheet, out, seen, 0));
+      for (const sheet of safe(() => [...(root.adoptedStyleSheets || [])], [])) jobs.push(readSheet(sheet, out, seen, 0));
+    }
+    await Promise.all(jobs);
+    return out;
+  }
+
+  async function readSheet(sheet, out, seen, depth) {
+    if (!sheet || seen.has(sheet)) return;
+    seen.add(sheet);
+    out.total++;
+    const rules = safe(() => sheet.cssRules);
+    const mediaText = safe(() => sheet.media && sheet.media.mediaText, '');
+    const media = mediaText && mediaText !== 'all' ? [mediaText] : [];
+    if (rules) {
+      await walkRules(rules, { base: sheet.href || document.baseURI, media, parent: null }, out, seen, depth);
+      return;
+    }
+    if (!sheet.href || seen.has(sheet.href)) return;
+    seen.add(sheet.href);
+    const text = await fetchText(sheet.href);
+    if (text == null) out.blocked.push(sheet.href);
+    else await readCssText(text, sheet.href, media, out, seen, depth);
+  }
+
+  async function readCssText(text, href, media, out, seen, depth) {
+    const sheet = new CSSStyleSheet();
+    try {
+      sheet.replaceSync(text); // descarta @import (seguimos à mão abaixo)
+    } catch {
+      out.blocked.push(href);
+      return;
+    }
+    const jobs = [walkRules(sheet.cssRules, { base: href, media, parent: null }, out, seen, depth)];
+    for (const m of text.matchAll(/@import\s+(?:url\(\s*)?["']?([^"')\s;]+)["']?\s*\)?\s*([^;]*);/gi)) {
+      const url = absUrl(m[1], href);
+      if (!url) continue;
+      out.imports.push(url);
+      if (depth < 3 && !seen.has(url)) {
+        seen.add(url);
+        out.total++;
+        const sub = m[2] && m[2].trim() ? [...media, m[2].trim()] : media;
+        jobs.push(fetchText(url).then((t) => (t == null ? out.blocked.push(url) : readCssText(t, url, sub, out, seen, depth + 1))));
+      }
+    }
+    await Promise.all(jobs);
+  }
+
+  const STATE_RE = /:(hover|focus-visible|focus-within|focus|active)\b/;
+
+  async function walkRules(rules, ctx, out, seen, depth) {
+    const pending = [];
+    const visit = (list, c) => {
+      for (const rule of list) {
+        try {
+          if (rule instanceof CSSStyleRule) {
+            const selector = c.parent ? nest(rule.selectorText, c.parent) : rule.selectorText;
+            styleRule(rule, selector, c, out);
+            if (rule.cssRules && rule.cssRules.length) visit(rule.cssRules, { ...c, parent: selector });
+          } else if (rule instanceof CSSMediaRule) {
+            const cond = rule.conditionText || rule.media.mediaText;
+            inc(out.media, cond);
+            visit(rule.cssRules, { ...c, media: [...c.media, cond] });
+          } else if (rule instanceof CSSImportRule) {
+            const url = absUrl(rule.href, c.base);
+            if (url) out.imports.push(url);
+            const m = safe(() => rule.media.mediaText, '');
+            const media = m && m !== 'all' ? [...c.media, m] : c.media;
+            const child = safe(() => rule.styleSheet);
+            const childRules = child && safe(() => child.cssRules);
+            if (childRules) {
+              if (!seen.has(child)) {
+                seen.add(child);
+                out.total++;
+                visit(childRules, { base: url || c.base, media, parent: null });
+              }
+            } else if (url && !seen.has(url) && depth < 3) {
+              seen.add(url);
+              out.total++;
+              pending.push(fetchText(url).then((t) => (t == null ? out.blocked.push(url) : readCssText(t, url, media, out, seen, depth + 1))));
+            }
+          } else if (rule instanceof CSSFontFaceRule) {
+            fontFace(rule, c, out);
+          } else if (rule instanceof CSSKeyframesRule) {
+            out.keyframes.set(rule.name, rule.cssText);
+          } else if (typeof CSSPropertyRule !== 'undefined' && rule instanceof CSSPropertyRule) {
+            out.properties.push({ name: rule.name, syntax: rule.syntax, inherits: rule.inherits, initial: rule.initialValue });
+          } else if (rule.cssRules) {
+            if (typeof CSSContainerRule !== 'undefined' && rule instanceof CSSContainerRule) out.container++;
+            visit(rule.cssRules, c); // @supports, @layer, @container, @scope, @starting-style…
+          }
+        } catch {
+          /* regra exótica: segue */
+        }
+      }
+    };
+    visit(rules, ctx);
+    await Promise.all(pending);
+  }
+
+  function nest(selector, parent) {
+    return splitTop(selector)
+      .map((s) => (s.includes('&') ? s.replace(/&/g, `:is(${parent})`) : `:is(${parent}) ${s}`))
+      .join(', ');
+  }
+
+  function styleRule(rule, selector, ctx, out) {
+    const style = rule.style;
+    for (let i = 0; i < style.length; i++) {
+      const prop = style[i];
+      if (prop.startsWith('--') && out.vars.length < 4000) {
+        out.vars.push({ name: prop, value: style.getPropertyValue(prop).trim(), selector, media: ctx.media.join(' and ') });
+      }
+    }
+    const text = style.cssText;
+    if (text.includes('var(')) for (const m of text.matchAll(/var\(\s*(--[\w-]+)/g)) out.referenced.add(m[1]);
+    if (STATE_RE.test(selector) && out.stateRules.length < 8000) {
+      out.stateRules.push({ selector, css: text, media: ctx.media.slice() });
+    }
+  }
+
+  function fontFace(rule, ctx, out) {
+    const s = rule.style;
+    const src = s.getPropertyValue('src');
+    const sources = [];
+    for (const m of src.matchAll(/url\(\s*(["']?)(.*?)\1\s*\)\s*(?:format\(\s*["']?([\w-]+)["']?\s*\))?/g)) {
+      const raw = m[2];
+      if (raw.startsWith('data:') && raw.length > 1_500_000) continue;
+      const url = raw.startsWith('data:') ? raw : absUrl(raw, ctx.base);
+      if (!url) continue;
+      const ext = (/\.(woff2|woff|ttf|otf|eot)(\?|#|$)/i.exec(url) || [])[1];
+      sources.push({ url, format: (m[3] || ext || '').toLowerCase() });
+    }
+    out.fontFaces.push({
+      family: s.getPropertyValue('font-family').trim().replace(/^["']|["']$/g, ''),
+      weight: s.getPropertyValue('font-weight').trim() || '400',
+      style: s.getPropertyValue('font-style').trim() || 'normal',
+      display: s.getPropertyValue('font-display').trim(),
+      unicodeRange: s.getPropertyValue('unicode-range').trim(),
+      sources,
+    });
+  }
+
+  // ---------------------------------------------------------------- regras de estado (:hover, :focus…)
+  const STATE_NAMES = ['focus-visible', 'focus-within', 'hover', 'focus', 'active'];
+
+  // Percorre um seletor respeitando escapes (\:), aspas e parênteses; fn(ch, i, depth) decide o que fazer.
+  function scanSelector(sel, fn) {
+    let depth = 0;
+    let quote = null;
+    for (let i = 0; i < sel.length; i++) {
+      const ch = sel[i];
+      if (ch === '\\') {
+        fn(sel.slice(i, i + 2), i, depth, true);
+        i++;
+        continue;
+      }
+      if (quote) {
+        if (ch === quote) quote = null;
+        fn(ch, i, depth, true);
+        continue;
+      }
+      if (ch === '"' || ch === "'") quote = ch;
+      if (ch === '(' || ch === '[') depth++;
+      const skip = fn(ch, i, depth, false);
+      if (ch === ')' || ch === ']') depth--;
+      if (typeof skip === 'number') i += skip;
+    }
+  }
+
+  // Quebra um seletor em compostos e combinadores de nível zero.
+  function compounds(selector) {
+    const parts = [];
+    let cur = '';
+    const push = () => {
+      if (cur.trim()) parts.push({ type: 'c', v: cur.trim() });
+      cur = '';
+    };
+    scanSelector(selector, (ch, i, depth, literal) => {
+      if (!literal && depth === 0 && (ch === '>' || ch === '+' || ch === '~')) {
+        push();
+        parts.push({ type: 'k', v: ch });
+        return;
+      }
+      if (!literal && depth === 0 && /\s/.test(ch)) {
+        push();
+        if (parts.length && parts[parts.length - 1].type === 'c') parts.push({ type: 'k', v: ' ' });
+        return;
+      }
+      cur += ch;
+    });
+    push();
+    while (parts.length && parts[parts.length - 1].type === 'k') parts.pop();
+    return parts;
+  }
+
+  // Estado de nível zero do composto (ignora "\:hover" de classes escapadas e o que está dentro de :not()).
+  function stateOf(compound) {
+    let found = null;
+    scanSelector(compound, (ch, i, depth, literal) => {
+      if (found || literal || depth !== 0 || ch !== ':' || compound[i + 1] === ':') return;
+      const name = STATE_NAMES.find((n) => compound.startsWith(n, i + 1) && !/[\w-]/.test(compound[i + 1 + n.length] || ''));
+      if (name) found = name;
+    });
+    return found;
+  }
+
+  function stripStates(compound) {
+    let out = '';
+    scanSelector(compound, (ch, i, depth, literal) => {
+      if (!literal && depth === 0 && ch === ':' && compound[i + 1] !== ':') {
+        const name = STATE_NAMES.find((n) => compound.startsWith(n, i + 1) && !/[\w-]/.test(compound[i + 1 + n.length] || ''));
+        if (name) return name.length; // pula ":hover"
+      }
+      out += ch;
+      return undefined;
+    });
+    return out || '*';
+  }
+
+  // ".card:hover .title" → { state:'hover', target:'.card .title', owner:'.card' (ancestral) }
+  function parseState(sel) {
+    const parts = compounds(sel.trim());
+    if (!parts.length) return null;
+    let stateIdx = -1;
+    let state = null;
+    parts.forEach((p, i) => {
+      if (p.type !== 'c' || stateIdx !== -1) return;
+      const st = stateOf(p.v);
+      if (st) {
+        stateIdx = i;
+        state = st;
+      }
+    });
+    if (stateIdx === -1) return null;
+    const join = (list) => list.map((p) => (p.type === 'c' ? stripStates(p.v) : p.v === ' ' ? ' ' : ` ${p.v} `)).join('').replace(/\s+/g, ' ').trim();
+    return { state, target: join(parts), owner: stateIdx === parts.length - 1 ? null : join(parts.slice(0, stateIdx + 1)) };
+  }
+
+  const mediaOk = (list) => list.every((m) => safe(() => matchMedia(m).matches, false));
+
+  function declsFromCss(cssText, el) {
+    const cs = getComputedStyle(el);
+    const out = [];
+    for (const part of splitTop(cssText, ';')) {
+      const i = part.indexOf(':');
+      if (i < 1) continue;
+      const prop = part.slice(0, i).trim();
+      let value = part.slice(i + 1).trim().replace(/\s*!important$/, '');
+      if (prop.startsWith('--')) continue;
+      value = resolveVarsWith(value, (name) => cs.getPropertyValue(name).trim());
+      // o CSSOM serializa #hex como rgb(); volta para hex como no resto do kit
+      value = value.replace(/rgba?\([^)]*\)/g, (m) => {
+        const c = normColor(m);
+        return c ? c.css : m;
+      });
+      out.push([prop, value]);
+    }
+    return out;
+  }
+
+  function resolveVarsWith(value, lookup, depth = 0) {
+    if (depth > 8 || !value.includes('var(')) return value;
+    let out = '';
+    let i = 0;
+    while (i < value.length) {
+      const start = value.indexOf('var(', i);
+      if (start < 0) {
+        out += value.slice(i);
+        break;
+      }
+      out += value.slice(i, start);
+      let depthP = 0;
+      let j = start + 3;
+      for (; j < value.length; j++) {
+        if (value[j] === '(') depthP++;
+        else if (value[j] === ')' && --depthP === 0) break;
+      }
+      const inner = value.slice(start + 4, j);
+      const comma = splitTop(inner);
+      const name = (comma[0] || '').trim();
+      const fallback = inner.includes(',') ? inner.slice(inner.indexOf(',') + 1).trim() : '';
+      const got = lookup(name);
+      out += got ? resolveVarsWith(got, lookup, depth + 1) : resolveVarsWith(fallback, lookup, depth + 1);
+      i = j + 1;
+    }
+    return out;
+  }
+
+  // Declarações de estado que valem para `el` (estado no próprio elemento).
+  // Seletores de estado já analisados, uma vez por leitura de CSS (analisar por elemento custava dezenas de segundos
+  // em sites com milhares de regras :hover). Regras de @media que não valem agora ficam de fora.
+  const QUICK_STATE = /:(hover|focus|active)/;
+  function parsedStates(css) {
+    if (!css.parsedStates) {
+      css.parsedStates = [];
+      const mediaCache = new Map();
+      for (const r of css.stateRules) {
+        if (r.media.length) {
+          const key = r.media.join('|');
+          if (!mediaCache.has(key)) mediaCache.set(key, mediaOk(r.media));
+          if (!mediaCache.get(key)) continue;
+        }
+        for (const sel of splitTop(r.selector)) {
+          if (!QUICK_STATE.test(sel)) continue;
+          const p = parseState(sel);
+          if (p) css.parsedStates.push({ ...p, css: r.css });
+        }
+      }
+    }
+    return css.parsedStates;
+  }
+
+  function stateDecls(el, css, wanted = ['hover', 'focus', 'focus-visible', 'active']) {
+    const out = {};
+    for (const p of parsedStates(css)) {
+      if (p.owner || !wanted.includes(p.state)) continue;
+      if (!safe(() => el.matches(p.target), false)) continue;
+      const map = (out[p.state] = out[p.state] || {});
+      for (const [k, v] of declsFromCss(p.css, el)) map[k] = v;
+    }
+    return out;
+  }
+
   // ---------------------------------------------------------------- varredura do DOM
   const directText = (el) => {
     let n = 0;
@@ -173,7 +518,108 @@
 
   const INTERACTIVE = 'a[href],button,[role=button],input[type=submit],input[type=button],summary';
   const isInteractive = (el, cs) => safe(() => el.matches(INTERACTIVE), false) || cs.cursor === 'pointer';
+  const TEXT_INPUT =
+    'input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]):not([type=range]):not([type=color]):not([type=file]):not([type=image]):not([type=reset]),textarea,select';
+
   const transparent = (c) => !c || c.a === 0;
+
+  function paintOf(cs) {
+    const bgi = cs.backgroundImage;
+    if (bgi && bgi !== 'none' && bgi.includes('gradient(')) return bgi;
+    const c = normColor(cs.backgroundColor);
+    return transparent(c) ? 'transparent' : c.css;
+  }
+
+  // { border: '1px solid #ccc' } quando os 4 lados são iguais; senão só os lados que têm borda (border-bottom…)
+  function borderOf(cs) {
+    const names = ['top', 'right', 'bottom', 'left'];
+    const sides = ['Top', 'Right', 'Bottom', 'Left'].map((s) => {
+      const w = parseFloat(cs[`border${s}Width`]);
+      const style = cs[`border${s}Style`];
+      if (!(w > 0) || style === 'none' || style === 'hidden') return 'none';
+      const c = normColor(cs[`border${s}Color`]);
+      return `${round(w, 2)}px ${style} ${c ? c.css : cs[`border${s}Color`]}`;
+    });
+    if (sides.every((s) => s === sides[0])) return { border: sides[0] };
+    const out = {};
+    sides.forEach((v, i) => {
+      if (v !== 'none') out[`border-${names[i]}`] = v;
+    });
+    return out;
+  }
+
+  const box4 = (cs, prop) => {
+    const v = ['Top', 'Right', 'Bottom', 'Left'].map((s) => `${round(parseFloat(cs[`${prop}${s}`]) || 0, 1)}px`);
+    if (v.every((x) => x === v[0])) return v[0];
+    if (v[0] === v[2] && v[1] === v[3]) return `${v[0]} ${v[1]}`;
+    return v.join(' ');
+  };
+
+  function transitionOf(cs) {
+    if (!cs.transitionDuration || cs.transitionDuration === '0s') return 'none';
+    const props = splitTop(cs.transitionProperty);
+    const durs = splitTop(cs.transitionDuration);
+    const eases = splitTop(cs.transitionTimingFunction);
+    return props
+      .map((p, i) => `${p} ${durs[i % durs.length]} ${eases[i % eases.length]}`)
+      .filter((t) => !/ 0s /.test(` ${t} `))
+      .slice(0, 4)
+      .join(', ');
+  }
+
+  function typeOf(cs) {
+    return {
+      'font-family': firstFamily(cs.fontFamily),
+      'font-size': cs.fontSize,
+      'font-weight': cs.fontWeight,
+      'line-height': cs.lineHeight,
+      'letter-spacing': cs.letterSpacing,
+      'text-transform': cs.textTransform,
+    };
+  }
+
+  function signature(kind, el, cs, rect) {
+    const color = normColor(cs.color);
+    const sig = {
+      background: paintOf(cs),
+      color: color ? color.css : cs.color,
+      ...borderOf(cs),
+      'border-radius': cs.borderTopLeftRadius,
+      padding: box4(cs, 'padding'),
+      ...typeOf(cs),
+      'box-shadow': cs.boxShadow,
+      transition: transitionOf(cs),
+    };
+    if (kind === 'button' || kind === 'input') sig.height = `${Math.round(rect.height)}px`;
+    if (kind === 'link') {
+      return {
+        color: sig.color,
+        'text-decoration': cs.textDecorationLine,
+        'font-weight': cs.fontWeight,
+        'text-underline-offset': cs.textUnderlineOffset,
+        transition: sig.transition,
+      };
+    }
+    if (kind === 'card') {
+      return {
+        background: sig.background, ...borderOf(cs), 'border-radius': sig['border-radius'], padding: sig.padding,
+        'box-shadow': sig['box-shadow'], 'backdrop-filter': cs.backdropFilter || 'none', transition: sig.transition,
+      };
+    }
+    if (kind === 'input') {
+      const ph = safe(() => normColor(getComputedStyle(el, '::placeholder').color));
+      sig['placeholder-color'] = ph ? ph.css : '';
+    }
+    return sig;
+  }
+
+  function addComponent(map, sig, el) {
+    const key = JSON.stringify(sig);
+    let e = map.get(key);
+    if (!e) map.set(key, (e = { css: sig, count: 0, sample: '', example: describe(el), el }));
+    e.count++;
+    if (!e.sample) e.sample = (el.value || el.placeholder || sampleText(el) || '').slice(0, 40);
+  }
 
   function looksLikeButton(el, cs, rect) {
     if (rect.width > 520 || rect.height > 110 || rect.height < 18) return false;
@@ -183,6 +629,18 @@
     const filled = !transparent(normColor(cs.backgroundColor)) || cs.backgroundImage.includes('gradient(');
     const bordered = ['Top', 'Right', 'Bottom', 'Left'].every((s) => parseFloat(cs[`border${s}Width`]) > 0 && cs[`border${s}Style`] !== 'none');
     return padded && (filled || bordered) && cs.display !== 'inline';
+  }
+
+  function looksLikeCard(el, cs, rect) {
+    if (rect.width < 160 || rect.width > 900 || rect.height < 80 || el.children.length < 2) return false;
+    if (!(parseFloat(cs.borderTopLeftRadius) > 0)) return false;
+    const pad = Math.max(parseFloat(cs.paddingTop) || 0, parseFloat(cs.paddingLeft) || 0);
+    if (pad < 8) return false;
+    const bg = normColor(cs.backgroundColor);
+    const parentBg = el.parentElement ? normColor(getComputedStyle(el.parentElement).backgroundColor) : null;
+    const distinctBg = !transparent(bg) && (!parentBg || parentBg.css !== bg.css);
+    const bordered = parseFloat(cs.borderTopWidth) > 0 && cs.borderTopStyle !== 'none';
+    return distinctBg || bordered || cs.boxShadow !== 'none';
   }
 
   function addColor(S, str, role, weight = 1, extra = null) {
@@ -333,6 +791,12 @@
         a.count++;
       });
     }
+
+    // componentes recorrentes
+    if (buttonish) addComponent(S.buttons, signature('button', el, cs, rect), el);
+    else if (tag === 'a' && chars) addComponent(S.links, signature('link', el, cs, rect), el);
+    if (safe(() => el.matches(TEXT_INPUT), false)) addComponent(S.inputs, signature('input', el, cs, rect), el);
+    else if (looksLikeCard(el, cs, rect)) addComponent(S.cards, signature('card', el, cs, rect), el);
   }
 
   function walk(limit) {
@@ -341,6 +805,7 @@
       padding: new Map(), margin: new Map(), gap: new Map(), radii: new Map(), shadows: new Map(),
       textShadows: new Map(), filters: new Map(), backdrops: new Map(), borders: new Map(), maxWidths: new Map(),
       displays: new Map(), transitions: new Map(), animations: new Map(),
+      buttons: new Map(), inputs: new Map(), cards: new Map(), links: new Map(),
       shadowRoots: [], visited: 0, styled: 0, total: 0,
     };
     S.total = document.getElementsByTagName('*').length;
@@ -369,6 +834,96 @@
     return S;
   }
 
+  // ---------------------------------------------------------------- variáveis CSS
+  const DARK_SEL = /(\.dark\b|\.dark-mode\b|\.theme-dark\b|\[data-(?:theme|mode|color-scheme|bs-theme|color-mode)=["']?dark|\[class~=["']?dark)/;
+
+  function varScope(selector, media) {
+    const sel = selector.toLowerCase().replace(/:not\([^)]*\)/g, '');
+    const parts = splitTop(sel);
+    const darkMedia = /prefers-color-scheme:\s*dark/.test(media);
+    const lightMedia = /prefers-color-scheme:\s*light/.test(media);
+    const rootLike = (p) => /^(:root|html|body|:host)(\[[^\]]*\]|:[a-z-]+(\([^)]*\))?|\.[\w-]+)*$/.test(p) || /^(\.dark|\.light|\[data-[\w-]+=["']?[\w-]+["']?\]|\.theme-[\w-]+)$/.test(p);
+    const plainMedia = !media || /^(screen|all)?$/.test(media.trim());
+    if (parts.some((p) => DARK_SEL.test(p) && (rootLike(p) || /^(html|:root|body)?\s*\.dark$/.test(p)))) return 'dark';
+    if (darkMedia && parts.some(rootLike)) return 'dark';
+    if (parts.some(rootLike) && (plainMedia || lightMedia)) return 'root';
+    return 'other';
+  }
+
+  function varType(name, value) {
+    const v = value.trim();
+    const n = name.toLowerCase();
+    if (!v) return { type: 'empty' };
+    if (/^-?[\d.]+m?s$/.test(v)) return { type: 'duration' };
+    if (/^(cubic-bezier|steps|linear)\(|^(ease|ease-in|ease-out|ease-in-out|linear|step-start|step-end)$/.test(v)) return { type: 'easing' };
+    if (/^[\d.]+(deg)?\s+[\d.]+%\s+[\d.]+%(\s*\/\s*[\d.]+%?)?$/.test(v)) {
+      const c = normColor(`hsl(${v})`);
+      if (c) return { type: 'color', color: c, channels: 'hsl' };
+    }
+    if (/rgb/.test(n) && /^\d{1,3}[\s,]+\d{1,3}[\s,]+\d{1,3}$/.test(v)) {
+      const c = normColor(`rgb(${v.replace(/[\s,]+/g, ', ')})`);
+      if (c) return { type: 'color', color: c, channels: 'rgb' };
+    }
+    if (!/^-?[\d.]/.test(v)) {
+      const c = normColor(v);
+      if (c) return { type: 'color', color: c };
+    }
+    if (/gradient\(/.test(v)) return { type: 'gradient' };
+    if (/shadow/.test(n) && /\d/.test(v)) return { type: 'shadow' };
+    if (/(font|family|typeface)/.test(n) && /[a-z]/i.test(v) && !/^-?[\d.]/.test(v)) return { type: 'fontFamily' };
+    if (/^-?[\d.]+(px|rem|em|%|vh|vw|vmin|vmax|ch|ex|svh|dvh|lvh)$/.test(v) || /^(clamp|min|max|calc)\(/.test(v)) return { type: 'dimension' };
+    if (/^-?[\d.]+$/.test(v)) return { type: 'number' };
+    return { type: 'other' };
+  }
+
+  function variables(css) {
+    const rootMap = new Map();
+    const darkMap = new Map();
+    const entries = [];
+    for (const v of css.vars) {
+      if (v.name.startsWith('--tw-')) continue; // internas do Tailwind
+      const scope = varScope(v.selector, v.media || '');
+      if (scope === 'other') continue;
+      (scope === 'dark' ? darkMap : rootMap).set(v.name, v.value);
+      entries.push({ ...v, scope });
+    }
+    const out = new Map();
+    const resolve = (val, maps) => resolveVarsWith(val, (name) => {
+      for (const m of maps) if (m.has(name)) return m.get(name);
+      return '';
+    });
+    for (const e of entries) {
+      const resolved = e.scope === 'dark' ? resolve(e.value, [darkMap, rootMap]) : resolve(e.value, [rootMap]);
+      const t = varType(e.name, resolved);
+      const key = `${e.scope}|${e.name}`;
+      out.set(key, {
+        name: e.name, scope: e.scope, value: e.value, resolved, type: t.type,
+        color: t.color ? { hex: t.color.hex, a: t.color.a, css: t.color.css } : null, channels: t.channels || null,
+        used: css.referenced.has(e.name),
+      });
+    }
+    return [...out.values()].slice(0, 2500);
+  }
+
+  // ---------------------------------------------------------------- breakpoints
+  function breakpoints(media) {
+    const map = new Map();
+    const add = (type, num, unit, n) => {
+      let v = parseFloat(num) * (unit === 'px' ? 1 : 16);
+      if (type === 'max') v = Number.isInteger(v) && (v + 1) % 8 === 0 ? v + 1 : Number.isInteger(v) ? v : Math.ceil(v);
+      v = Math.round(v);
+      if (v < 240 || v > 3000) return;
+      map.set(v, (map.get(v) || 0) + n);
+    };
+    for (const [cond, n] of media) {
+      if (/print/.test(cond) && !/screen/.test(cond)) continue;
+      for (const m of cond.matchAll(/\((min|max)-width\s*:\s*([\d.]+)(px|em|rem)\s*\)/g)) add(m[1], m[2], m[3], n);
+      for (const m of cond.matchAll(/width\s*(>=|>|<=|<)\s*([\d.]+)(px|em|rem)/g)) add(m[1][0] === '>' ? 'min' : 'max', m[2], m[3], n);
+      for (const m of cond.matchAll(/([\d.]+)(px|em|rem)\s*(<=|<|>=|>)\s*width/g)) add(m[3][0] === '<' ? 'min' : 'max', m[1], m[2], n);
+    }
+    return [...map].map(([px, count]) => ({ px, count })).sort((a, b) => a.px - b.px);
+  }
+
   // ---------------------------------------------------------------- meta tags
   function metaContent(sel) {
     return safe(() => document.querySelector(sel).getAttribute('content'), '') || '';
@@ -379,9 +934,29 @@
 
   D.extract = async (opts = {}) => {
     const t0 = performance.now();
+    fetchBudget = 0;
     progress('Lendo o DOM…');
     const S = walk(opts.limit || 12000);
     const t1 = performance.now();
+    progress('Lendo as folhas de estilo…');
+    const css = await readSheets(S.shadowRoots);
+    D.css = css; // reaproveitado pela captura de componentes
+    const t2 = performance.now();
+    const vars = variables(css);
+
+    const loaded = new Set();
+    for (const f of safe(() => [...document.fonts], [])) {
+      if (f.status === 'loaded') loaded.add(`${f.family.replace(/^["']|["']$/g, '')}|${f.weight}|${f.style}`);
+    }
+
+    const component = (map, n) =>
+      [...map.values()]
+        .sort((a, b) => b.count - a.count)
+        .slice(0, n)
+        .map((c) => {
+          const states = safe(() => stateDecls(c.el, css), {});
+          return { css: c.css, count: c.count, sample: c.sample, example: c.example, states };
+        });
 
     const root = getComputedStyle(document.documentElement);
     const body = document.body ? getComputedStyle(document.body) : root;
@@ -404,12 +979,14 @@
         bodyColor: (normColor(body.color) || {}).css || null,
         bodyFont: firstFamily(body.fontFamily),
         counts: { total: S.total, visited: S.visited, styled: S.styled, stride: S.stride },
-        ms: { dom: Math.round(t1 - t0) },
+        sheets: { total: css.total, blocked: css.blocked.slice(0, 50), imports: [...new Set(css.imports)].slice(0, 50) },
+        ms: { dom: Math.round(t1 - t0), css: Math.round(t2 - t1) },
       },
       colors: [...S.colors.values()].sort((a, b) => b.count - a.count).slice(0, 400),
       gradients: toList(S.gradients, 'css').slice(0, 60),
       typography: [...S.typo.values()].sort((a, b) => b.chars - a.chars).slice(0, 80),
       families: [...S.families.values()].sort((a, b) => b.chars - a.chars).slice(0, 20),
+      fontFaces: css.fontFaces.slice(0, 400).map((f) => ({ ...f, loaded: loaded.has(`${f.family}|${f.weight}|${f.style}`) })),
       spacing: { padding: toList(S.padding, 'px'), margin: toList(S.margin, 'px'), gap: toList(S.gap, 'px') },
       radii: toList(S.radii).slice(0, 40),
       shadows: toList(S.shadows).slice(0, 40),
@@ -419,6 +996,11 @@
       borders: toList(S.borders).slice(0, 20),
       maxWidths: toList(S.maxWidths, 'px').slice(0, 20),
       displays: toList(S.displays).slice(0, 12),
+      breakpoints: breakpoints(css.media),
+      containerQueries: css.container,
+      variables: vars,
+      properties: css.properties.slice(0, 100),
+      keyframes: [...css.keyframes].map(([name, text]) => ({ name, css: text })).slice(0, 200),
       transitions: toList(S.transitions, 'key').slice(0, 80).map(({ key, count }) => {
         const [property, durationMs, easing, delayMs] = key.split('|');
         return { property, durationMs: +durationMs, easing, delayMs: +delayMs, count };
@@ -427,6 +1009,12 @@
         const [name, durationMs, easing, delayMs, iterations, direction, fillMode, timeline] = key.split('|');
         return { name, durationMs: +durationMs, easing, delayMs: +delayMs, iterations, direction, fillMode, timeline, count: v.count, example: v.example };
       }).sort((a, b) => b.count - a.count).slice(0, 80),
+      components: {
+        buttons: component(S.buttons, 6),
+        inputs: component(S.inputs, 4),
+        cards: component(S.cards, 4),
+        links: component(S.links, 4),
+      },
     };
     result.meta.ms.total = Math.round(performance.now() - t0);
     return result;
