@@ -4,6 +4,7 @@ Mudanças do Decalque, da mais nova para a mais antiga. Cada entrada linka o PR 
 
 ## [Não lançado]
 
+- [#7](https://github.com/VictorNascimento14/Decalque/pull/7) — feat(extração): coletar imagens, SVGs, Lottie, vídeos e a stack do site · [nota](prs/2026-10-02-pr-7-extracao-assets.md)
 - [#6](https://github.com/VictorNascimento14/Decalque/pull/6) — feat(extração): ler variáveis, @keyframes, fontes, breakpoints e estados das folhas de estilo · [nota](prs/2026-10-02-pr-6-extracao-folhas-de-estilo.md)
 - [#5](https://github.com/VictorNascimento14/Decalque/pull/5) — feat(extração): ler cores, tipografia, espaçamentos e efeitos dos estilos computados · [nota](prs/2026-10-02-pr-5-extracao-estilos.md)
 - [#4](https://github.com/VictorNascimento14/Decalque/pull/4) — feat: criar a extensão com manifest, ícone e service worker · [nota](prs/2026-10-02-pr-4-extensao.md)

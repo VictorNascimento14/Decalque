@@ -495,6 +495,121 @@
     return out;
   }
 
+  // ---------------------------------------------------------------- SVG
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const PAINT = [
+    ['fill', 'fill'], ['stroke', 'stroke'], ['strokeWidth', 'stroke-width'], ['fillOpacity', 'fill-opacity'],
+    ['strokeOpacity', 'stroke-opacity'], ['opacity', 'opacity'], ['strokeLinecap', 'stroke-linecap'],
+    ['strokeLinejoin', 'stroke-linejoin'], ['fillRule', 'fill-rule'],
+  ];
+  const SVG_DEFAULT = {
+    fill: '#000000', stroke: 'none', 'stroke-width': '1px', 'fill-opacity': '1', 'stroke-opacity': '1', opacity: '1',
+    'stroke-linecap': 'butt', 'stroke-linejoin': 'miter', 'fill-rule': 'nonzero',
+  };
+  const SHAPES = /^(svg|g|path|circle|rect|ellipse|polygon|polyline|line|text|tspan|use)$/;
+
+  // SVG autônomo: o CSS da página vira atributo, referências (#sprite, url(#grad)) vêm junto.
+  function serializeSvg(svg, cs, rect) {
+    const clone = svg.cloneNode(true);
+    const rootColor = normColor(cs.color);
+    const src = [svg, ...svg.querySelectorAll('*')];
+    const dst = [clone, ...clone.querySelectorAll('*')];
+    for (let i = 0; i < src.length && i < 2000; i++) {
+      const o = src[i];
+      const c = dst[i];
+      if (!c || !SHAPES.test(o.localName)) continue;
+      const s = getComputedStyle(o);
+      for (const [js, attr] of PAINT) {
+        let v = s[js];
+        if (!v) continue;
+        if (attr === 'fill' || attr === 'stroke') {
+          if (v.startsWith('url(')) continue;
+          if (v !== 'none') {
+            const col = normColor(v);
+            if (!col) continue;
+            v = rootColor && col.css === rootColor.css ? 'currentColor' : col.css;
+          }
+        }
+        if (v === SVG_DEFAULT[attr] && !c.hasAttribute(attr)) continue;
+        if (o === svg && attr === 'opacity') continue;
+        c.setAttribute(attr, v);
+      }
+      c.removeAttribute('class');
+    }
+    inlineRefs(clone, svg);
+    // o .svg do kit pode ser aberto direto no navegador: nada que execute código vai junto
+    for (const bad of clone.querySelectorAll('script,foreignObject,iframe')) bad.remove();
+    for (const node of [clone, ...clone.querySelectorAll('*')]) {
+      for (const a of [...node.attributes]) {
+        const unsafeUrl = /href$/i.test(a.name) && /^\s*(javascript|vbscript):/i.test(a.value);
+        if (/^on/i.test(a.name) || unsafeUrl || !/^[A-Za-z_][\w:.-]*$/.test(a.name)) node.removeAttribute(a.name);
+      }
+    }
+    const w = clone.getAttribute('width');
+    const h = clone.getAttribute('height');
+    if (!w || /%|auto/.test(w)) clone.setAttribute('width', String(round(rect.width, 1)));
+    if (!h || /%|auto/.test(h)) clone.setAttribute('height', String(round(rect.height, 1)));
+    if (rootColor) clone.setAttribute('color', rootColor.css);
+    clone.removeAttribute('style');
+    return new XMLSerializer().serializeToString(clone);
+  }
+
+  function inlineRefs(clone, svg) {
+    const root = svg.getRootNode();
+    const lookup = (id) => safe(() => (root.getElementById ? root.getElementById(id) : null)) || document.getElementById(id);
+    let defs = null;
+    for (let pass = 0; pass < 4; pass++) {
+      const want = new Set();
+      for (const el of [clone, ...clone.querySelectorAll('*')]) {
+        for (const a of el.attributes) {
+          if ((a.name === 'href' || a.name === 'xlink:href') && a.value.startsWith('#')) want.add(a.value.slice(1));
+          for (const m of a.value.matchAll(/url\(\s*["']?#([^"')\s]+)["']?\s*\)/g)) want.add(m[1]);
+        }
+      }
+      let added = 0;
+      for (const id of want) {
+        const q = `[id="${id.replace(/["\\]/g, '\\$&')}"]`;
+        if (safe(() => clone.querySelector(q))) continue;
+        const ref = lookup(id);
+        if (!ref || ref.contains(svg)) continue;
+        if (!defs) defs = clone.insertBefore(document.createElementNS(SVG_NS, 'defs'), clone.firstChild);
+        defs.appendChild(ref.cloneNode(true));
+        added++;
+      }
+      if (!added) break;
+    }
+  }
+
+  function slug(s) {
+    return String(s || '')
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40);
+  }
+
+  function svgName(svg) {
+    const iconClass = classAttr(svg)
+      .split(/\s+/)
+      .find((c) => /^(lucide|tabler|bi|fa|ri|ph|heroicon|feather|icon)-./.test(c) && !/^(lucide|icon)$/.test(c));
+    const candidates = [
+      svg.getAttribute('aria-label'),
+      safe(() => svg.querySelector('title').textContent),
+      svg.getAttribute('data-icon'),
+      iconClass && iconClass.replace(/^(lucide|tabler|bi|fa|ri|ph|heroicon|feather|icon)-/, ''),
+      svg.id,
+      safe(() => svg.closest('[aria-label]').getAttribute('aria-label')),
+      safe(() => svg.closest('a,button').textContent.trim().slice(0, 30)),
+    ];
+    for (const c of candidates) {
+      const s = slug(c);
+      if (s) return s;
+    }
+    return 'svg';
+  }
+
   // ---------------------------------------------------------------- varredura do DOM
   const directText = (el) => {
     let n = 0;
@@ -667,7 +782,136 @@
     } else if (role in e) e[role]++;
   }
 
+  function addImage(S, url, kind, extra = {}) {
+    if (!url || url === 'about:blank' || url === location.href) return;
+    if (url.startsWith('data:') && (url.length > 3_000_000 || !/^data:image\//.test(url))) return;
+    const abs = url.startsWith('data:') || url.startsWith('blob:') ? url : absUrl(url);
+    if (!abs) return;
+    let e = S.images.get(abs);
+    if (!e) S.images.set(abs, (e = { url: abs, kind, count: 0, w: 0, h: 0, alt: '' }));
+    e.count++;
+    if (extra.w > e.w) e.w = extra.w;
+    if (extra.h > e.h) e.h = extra.h;
+    if (extra.alt && !e.alt) e.alt = String(extra.alt).slice(0, 120);
+  }
+
   // Parser de srcset da especificação HTML: URL = sequência sem espaço; vírgula só separa fora de parênteses.
+  function parseSrcset(set) {
+    const out = [];
+    const s = String(set || '');
+    let i = 0;
+    while (i < s.length) {
+      while (i < s.length && /[\s,]/.test(s[i])) i++;
+      let start = i;
+      while (i < s.length && !/\s/.test(s[i])) i++;
+      let url = s.slice(start, i);
+      let desc = '';
+      if (/,+$/.test(url)) url = url.replace(/,+$/, '');
+      else {
+        start = i;
+        let depth = 0;
+        while (i < s.length) {
+          const ch = s[i];
+          if (ch === '(') depth++;
+          else if (ch === ')') depth--;
+          else if (ch === ',' && depth <= 0) break;
+          i++;
+        }
+        desc = s.slice(start, i).trim();
+        i++;
+      }
+      if (url) out.push({ url, desc });
+    }
+    return out;
+  }
+
+  function largestSrcset(srcset) {
+    let best = null;
+    let bestScore = -1;
+    for (const { url, desc } of parseSrcset(srcset)) {
+      const score = desc ? parseFloat(desc) * (/x$/.test(desc) ? 1000 : 1) : 1;
+      if (score > bestScore) {
+        best = url;
+        bestScore = score;
+      }
+    }
+    return best;
+  }
+
+  const urlsIn = (v) => [...String(v).matchAll(/url\(\s*(["']?)(.*?)\1\s*\)/g)].map((m) => m[2]).filter((u) => !u.startsWith('#'));
+
+  function visitAssets(el, cs, S, sampled) {
+    const tag = el.localName;
+    if (tag === 'img') {
+      // uma imagem = um arquivo: a maior resolução do srcset (ou do <source> que o navegador escolheu)
+      let best = null;
+      const picture = el.parentElement && el.parentElement.localName === 'picture' ? el.parentElement : null;
+      if (picture && el.currentSrc) {
+        for (const src of picture.querySelectorAll('source')) {
+          const set = src.getAttribute('srcset') || '';
+          const urls = parseSrcset(set).map((c) => absUrl(c.url));
+          if (urls.includes(el.currentSrc)) best = largestSrcset(set);
+        }
+      }
+      best = best || largestSrcset(el.getAttribute('srcset')) || el.currentSrc || el.src;
+      addImage(S, best, 'img', { w: el.naturalWidth, h: el.naturalHeight, alt: el.alt });
+      if (!el.currentSrc) {
+        for (const a of ['data-src', 'data-lazy-src', 'data-original', 'data-srcset']) {
+          const v = el.getAttribute(a);
+          if (v) addImage(S, a.endsWith('srcset') ? largestSrcset(v) : v, 'img', { alt: el.alt });
+        }
+      }
+    } else if (tag === 'video') {
+      const src = el.currentSrc || el.src || safe(() => el.querySelector('source').src);
+      if (src && !src.startsWith('blob:')) S.videos.set(absUrl(src), { url: absUrl(src), poster: el.poster || '' });
+      if (el.poster) addImage(S, el.poster, 'poster');
+    } else if (tag === 'input' && el.type === 'image') {
+      addImage(S, el.src, 'img');
+    } else if (/^(lottie-player|dotlottie-player|dotlottie-wc)$/.test(tag)) {
+      const src = el.getAttribute('src');
+      if (src) S.lottie.add(absUrl(src));
+    }
+    const lottieSrc = el.getAttribute('data-animation-path') ||
+      (el.getAttribute('data-animation-type') === 'lottie' ? el.getAttribute('data-src') : null);
+    if (lottieSrc) S.lottie.add(absUrl(lottieSrc));
+
+    const bgi = cs.backgroundImage;
+    if (bgi && bgi !== 'none' && bgi.includes('url(')) {
+      for (const u of urlsIn(bgi)) addImage(S, u, 'background');
+    }
+    const mask = cs.maskImage || cs.webkitMaskImage;
+    if (mask && mask !== 'none' && mask.includes('url(')) for (const u of urlsIn(mask)) addImage(S, u, 'mask');
+    if (sampled) {
+      for (const pseudo of ['::before', '::after']) {
+        const p = getComputedStyle(el, pseudo);
+        if (!p.content || p.content === 'none' || p.content === 'normal') continue;
+        for (const v of [p.backgroundImage, p.content, p.maskImage || p.webkitMaskImage]) {
+          if (v && v.includes('url(')) for (const u of urlsIn(v)) addImage(S, u, 'pseudo');
+        }
+      }
+    }
+  }
+
+  function visitSvg(svg, cs, S) {
+    const rect = svg.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return;
+    let i = 0;
+    for (const shape of svg.querySelectorAll('path,circle,rect,ellipse,polygon,polyline,line,text')) {
+      if (++i > 60) break;
+      const s = getComputedStyle(shape);
+      if (s.fill && s.fill !== 'none' && !s.fill.startsWith('url(')) addColor(S, s.fill, 'fill');
+      if (s.stroke && s.stroke !== 'none' && !s.stroke.startsWith('url(') && parseFloat(s.strokeWidth) > 0) addColor(S, s.stroke, 'fill');
+    }
+    if (S.svgs.size >= 500) return;
+    const markup = safe(() => serializeSvg(svg, cs, rect));
+    if (!markup || markup.length > 400_000) return;
+    let e = S.svgs.get(markup);
+    if (!e) S.svgs.set(markup, (e = { markup, name: svgName(svg), w: round(rect.width, 1), h: round(rect.height, 1), count: 0 }));
+    e.count++;
+  }
+
+  const ATTR_HINT = /^data-(aos|sal|scroll|framer|radix|slot|headlessui|v-|astro|svelte|reactroot|w-id|wf-|wow|lenis|splitting|motion|rive|lottie|swiper|animate|gsap|state|theme|testid)/;
+
   function visitStyle(el, cs, S, rect) {
     if (cs.visibility === 'hidden' || cs.display === 'contents') return;
     if (rect.width <= 0 && rect.height <= 0) return;
@@ -797,6 +1041,12 @@
     else if (tag === 'a' && chars) addComponent(S.links, signature('link', el, cs, rect), el);
     if (safe(() => el.matches(TEXT_INPUT), false)) addComponent(S.inputs, signature('input', el, cs, rect), el);
     else if (looksLikeCard(el, cs, rect)) addComponent(S.cards, signature('card', el, cs, rect), el);
+
+    for (const a of el.attributes) {
+      const m = ATTR_HINT.exec(a.name);
+      if (m) S.attrs.add(m[1]);
+    }
+    if (S.classes.length < 5000) for (const c of classAttr(el).split(/\s+/)) if (c) S.classes.push(c);
   }
 
   function walk(limit) {
@@ -806,7 +1056,8 @@
       textShadows: new Map(), filters: new Map(), backdrops: new Map(), borders: new Map(), maxWidths: new Map(),
       displays: new Map(), transitions: new Map(), animations: new Map(),
       buttons: new Map(), inputs: new Map(), cards: new Map(), links: new Map(),
-      shadowRoots: [], visited: 0, styled: 0, total: 0,
+      images: new Map(), svgs: new Map(), videos: new Map(), lottie: new Set(),
+      shadowRoots: [], attrs: new Set(), classes: [], visited: 0, styled: 0, total: 0,
     };
     S.total = document.getElementsByTagName('*').length;
     const stride = Math.max(1, Math.ceil(S.total / limit));
@@ -821,8 +1072,12 @@
       const cs = safe(() => getComputedStyle(el));
       if (!cs || cs.display === 'none') continue;
       const sampled = i++ % stride === 0;
+      visitAssets(el, cs, S, sampled);
       if (sampled) visitStyle(el, cs, S, el.getBoundingClientRect());
-      if (el.localName === 'svg') continue; // o miolo do SVG não tem estilo de página
+      if (el.localName === 'svg') {
+        visitSvg(el, cs, S);
+        continue;
+      }
       const kids = el.children;
       for (let k = kids.length - 1; k >= 0; k--) stack.push(kids[k]);
       const sr = el.shadowRoot || (getRoot && el.localName.includes('-') ? safe(() => getRoot(el)) : null);
@@ -924,9 +1179,94 @@
     return [...map].map(([px, count]) => ({ px, count })).sort((a, b) => a.px - b.px);
   }
 
-  // ---------------------------------------------------------------- meta tags
+  // ---------------------------------------------------------------- bibliotecas e stack (sinais do DOM)
+  function detectStack(S, css, vars) {
+    const found = [];
+    const scripts = [...document.scripts].map((s) => s.src).filter(Boolean);
+    const html = document.documentElement;
+    const has = (sel) => safe(() => !!document.querySelector(sel), false);
+    const src = (re) => scripts.find((u) => re.test(u));
+    const add = (name, kind, evidence) => found.push({ name, kind, evidence });
+    const gen = (safe(() => document.querySelector('meta[name="generator" i]').content, '') || '').toLowerCase();
+    const varNames = new Set(css.vars.map((v) => v.name.split('-').slice(0, 3).join('-')));
+    const anyVar = (prefix) => css.vars.some((v) => v.name.startsWith(prefix));
+
+    if (has('#__next') || src(/\/_next\//)) add('Next.js', 'framework', '#__next / _next');
+    if (has('#__nuxt') || src(/\/_nuxt\//)) add('Nuxt', 'framework', '#__nuxt');
+    if (has('#___gatsby')) add('Gatsby', 'framework', '#___gatsby');
+    if (src(/\/_app\/immutable\//)) add('SvelteKit', 'framework', '_app/immutable');
+    if (has('astro-island') || S.attrs.has('astro')) add('Astro', 'framework', 'astro-island');
+    if (S.attrs.has('v-')) add('Vue', 'framework', 'data-v-*');
+    if (S.attrs.has('reactroot') || has('[data-reactroot]')) add('React', 'framework', 'data-reactroot');
+    if (gen.includes('webflow') || html.hasAttribute('data-wf-site') || S.attrs.has('wf-')) add('Webflow', 'builder', 'data-wf-site');
+    if (gen.includes('framer') || S.attrs.has('framer')) add('Framer', 'builder', 'data-framer-*');
+    if (gen.includes('wordpress') || src(/wp-content|wp-includes/)) add('WordPress', 'builder', 'wp-content');
+    if (gen.includes('wix') || src(/parastorage\.com/)) add('Wix', 'builder', 'parastorage');
+    if (gen.includes('squarespace')) add('Squarespace', 'builder', 'meta generator');
+    if (src(/cdn\.shopify\.com/)) add('Shopify', 'builder', 'cdn.shopify.com');
+
+    const tw = S.classes.filter((c) => /^(?:[a-z0-9-]+:)*-?(?:p[trblxy]?|m[trblxy]?|w|h|size|min-w|max-w|min-h|text|bg|border|rounded|shadow|gap|space-[xy]|items|justify|font|leading|tracking|z|top|left|right|bottom|inset|opacity|translate|scale|rotate|duration|ease|grid-cols|col-span|flex)-[\w./[\]%#:-]+$/.test(c)).length;
+    if (anyVar('--tw-') || (tw > 40 && tw / Math.max(1, S.classes.length) > 0.2)) add('Tailwind CSS', 'css', `${tw} classes utilitárias`);
+    if (anyVar('--bs-') || S.classes.some((c) => /^(col-(sm|md|lg|xl)-\d+|btn-primary|container-fluid)$/.test(c))) add('Bootstrap', 'css', '--bs-* / classes');
+    if (S.classes.some((c) => /^Mui[A-Z]/.test(c))) add('Material UI', 'css', 'classes Mui*');
+    if (anyVar('--chakra-')) add('Chakra UI', 'css', '--chakra-*');
+    if (anyVar('--mantine-')) add('Mantine', 'css', '--mantine-*');
+    if (S.attrs.has('radix')) add('Radix UI', 'ui', 'data-radix-*');
+    if (S.attrs.has('slot') && (varNames.has('--radius') || anyVar('--primary'))) add('shadcn/ui', 'ui', 'data-slot + --primary');
+    if (S.attrs.has('headlessui')) add('Headless UI', 'ui', 'data-headlessui-*');
+
+    if (src(/gsap|tweenmax|greensock/i)) add('GSAP', 'motion', 'script gsap');
+    if (src(/scrolltrigger/i)) add('ScrollTrigger', 'motion', 'script ScrollTrigger');
+    if (S.attrs.has('aos') || src(/\baos(\.min)?\.js/i)) add('AOS', 'motion', 'data-aos');
+    if (html.classList.contains('lenis') || src(/lenis/i) || S.attrs.has('lenis')) add('Lenis', 'motion', 'html.lenis');
+    if (has('[data-scroll-container]')) add('Locomotive Scroll', 'motion', 'data-scroll-container');
+    if (S.lottie.size || has('lottie-player,dotlottie-player,dotlottie-wc') || src(/lottie|bodymovin/i)) add('Lottie', 'motion', 'player/arquivo .json');
+    if (has('.swiper,.swiper-container')) add('Swiper', 'ui', '.swiper');
+    if (has('.splide')) add('Splide', 'ui', '.splide');
+    if (has('.slick-slider')) add('Slick', 'ui', '.slick-slider');
+    if (has('.embla,[class*="embla"]')) add('Embla Carousel', 'ui', '.embla');
+    if (src(/three(\.module)?(\.min)?\.js|\/three@|three\.core/i)) add('Three.js', 'motion', 'script three');
+    if (has('spline-viewer') || src(/splinetool|spline\.design/i)) add('Spline', 'motion', 'spline-viewer');
+    if (S.attrs.has('rive') || src(/rive\.?(app|wasm)|@rive-app/i)) add('Rive', 'motion', 'rive');
+    if (S.attrs.has('w-id')) add('Webflow Interactions', 'motion', 'data-w-id');
+    if (S.classes.some((c) => c.startsWith('animate__'))) add('Animate.css', 'motion', 'animate__*');
+    if (S.classes.includes('wow')) add('WOW.js', 'motion', '.wow');
+    if (S.attrs.has('sal')) add('Sal.js', 'motion', 'data-sal');
+    if (S.attrs.has('splitting')) add('Splitting.js', 'motion', 'data-splitting');
+
+    if (has('svg.lucide,[class*="lucide-"]')) add('Lucide', 'icons', 'svg.lucide');
+    if (S.classes.some((c) => /^fa-[a-z]/.test(c))) add('Font Awesome', 'icons', 'fa-*');
+    if (has('.material-icons,.material-symbols-outlined,.material-symbols-rounded')) add('Material Symbols', 'icons', '.material-symbols');
+    if (has('iconify-icon,.iconify')) add('Iconify', 'icons', 'iconify');
+    if (vars.some((v) => v.name === '--radius') && vars.some((v) => v.name === '--ring')) add('Tokens no padrão shadcn', 'css', '--radius/--ring');
+    return found;
+  }
+
+  function resources(S) {
+    const extra = { rive: new Set(), models: new Set(), fontFiles: new Set() };
+    for (const e of safe(() => performance.getEntriesByType('resource'), [])) {
+      const u = e.name;
+      if (/\.lottie(\?|$)/i.test(u) || (/\.json(\?|$)/i.test(u) && /lottie|bodymovin|animation/i.test(u))) S.lottie.add(u);
+      else if (/\.riv(\?|$)/i.test(u)) extra.rive.add(u);
+      else if (/\.(glb|gltf)(\?|$)/i.test(u)) extra.models.add(u);
+      else if (/\.(mp4|webm|mov)(\?|$)/i.test(u) && !S.videos.has(u)) S.videos.set(u, { url: u, poster: '' });
+      else if (/\.(woff2?|ttf|otf)(\?|$)/i.test(u)) extra.fontFiles.add(u);
+    }
+    return extra;
+  }
+
   function metaContent(sel) {
     return safe(() => document.querySelector(sel).getAttribute('content'), '') || '';
+  }
+
+  function pageImages(S) {
+    for (const l of document.querySelectorAll('link[rel~="icon" i],link[rel="apple-touch-icon" i],link[rel="mask-icon" i]')) {
+      if (l.href) addImage(S, l.href, 'favicon');
+    }
+    for (const sel of ['meta[property="og:image"]', 'meta[name="twitter:image"]', 'meta[property="og:image:secure_url"]']) {
+      const v = metaContent(sel);
+      if (v) addImage(S, v, 'og');
+    }
   }
 
   // ---------------------------------------------------------------- extração principal
@@ -942,6 +1282,8 @@
     const css = await readSheets(S.shadowRoots);
     D.css = css; // reaproveitado pela captura de componentes
     const t2 = performance.now();
+    pageImages(S);
+    const extra = resources(S);
     const vars = variables(css);
 
     const loaded = new Set();
@@ -987,6 +1329,7 @@
       typography: [...S.typo.values()].sort((a, b) => b.chars - a.chars).slice(0, 80),
       families: [...S.families.values()].sort((a, b) => b.chars - a.chars).slice(0, 20),
       fontFaces: css.fontFaces.slice(0, 400).map((f) => ({ ...f, loaded: loaded.has(`${f.family}|${f.weight}|${f.style}`) })),
+      fontFiles: [...extra.fontFiles].slice(0, 200),
       spacing: { padding: toList(S.padding, 'px'), margin: toList(S.margin, 'px'), gap: toList(S.gap, 'px') },
       radii: toList(S.radii).slice(0, 40),
       shadows: toList(S.shadows).slice(0, 40),
@@ -1015,9 +1358,28 @@
         cards: component(S.cards, 4),
         links: component(S.links, 4),
       },
+      assets: {
+        images: [...S.images.values()].slice(0, 1500),
+        svgs: [...S.svgs.values()].sort((a, b) => b.count - a.count).slice(0, 500),
+        videos: [...S.videos.values()].slice(0, 60),
+        lottie: [...S.lottie].filter(Boolean).slice(0, 60),
+        rive: [...extra.rive].slice(0, 30),
+        models: [...extra.models].slice(0, 30),
+      },
+      stack: detectStack(S, css, vars),
     };
     result.meta.ms.total = Math.round(performance.now() - t0);
     return result;
   };
 
+  // Busca binária pedida pelo painel quando o fetch da extensão falha (cookies/Referer da própria página).
+  D.fetchAsBase64 = async (url) => {
+    const res = await fetch(url, { credentials: 'include' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const buf = new Uint8Array(await res.arrayBuffer());
+    if (buf.length > 40 * 1024 * 1024) throw new Error('arquivo grande demais');
+    let bin = '';
+    for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+    return { base64: btoa(bin), type: res.headers.get('content-type') || '' };
+  };
 })();
