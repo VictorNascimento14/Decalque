@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "lint": "node scripts/check-syntax.mjs",
-    "test": "node --test \"test/unit/**/*.test.js\""
+    "test": "node --test \"test/unit/**/*.test.js\"",
+    "icons": "node scripts/make-icons.mjs",
+    "pack": "node scripts/pack.mjs"
   },
   "devDependencies": {
     "playwright": "1.59.1"
