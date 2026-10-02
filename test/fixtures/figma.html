@@ -6,6 +6,9 @@
 <script>
 // Simula o subconjunto da API de plugins que o Decalque usa (o global `figma` que o Figma expõe na página).
 (async () => {
+  // ?mock=0: Figma sem a API ativa (teste do aviso). Apagar o mock depois do load não basta: o fetch abaixo não
+  // segura o evento load, e a API podia nascer depois — entre o delete do teste e a consulta do painel.
+  if (new URLSearchParams(location.search).get('mock') === '0') return;
   const png = new Uint8Array(await (await fetch('/hero.png')).arrayBuffer());
   const solid = (r, g, b, a = 1) => ({ type: 'SOLID', visible: true, color: { r, g, b, a } });
   const restDoc = {
