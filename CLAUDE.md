@@ -43,7 +43,7 @@ partir da v137, ignora `--load-extension`. `scripts/browser.mjs` acha o navegado
 4. **Content script não faz fetch entre origens**: pede ao service worker (`background.js`), que tem
    timeout e teto de tamanho.
 5. **Toda busca a pedido da página passa por `fetchableUrl`** (`lib/util.js`): só http(s), e rede local só
-   quando a página também é local — no service worker e nos downloads do kit. Sem isso, um
+   quando a página também é local — no service worker e, no painel, por `fetchBytes` (kit e fontes). Sem isso, um
    `<img data-src="file:///…">` punha um arquivo do disco no kit: a extensão descompactada lê `file://`.
 6. **Downloads do kit vão sem cookies.** O que só baixa com cookie vai pela própria página
    (`fetchAsBase64`).
